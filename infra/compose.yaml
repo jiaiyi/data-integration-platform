@@ -27,7 +27,10 @@ services:
     image: redis:8-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      # 宿主 6379 常被本机原生 Redis 占用，且 Docker 在这种情况下**不报错** ——
+      # 容器照样 Up (healthy)，只是端口发布静默失效，localhost:6379 会连到那个原生 Redis。
+      # 因此本项目固定发布到 16379，与 DIP_REDIS_URL 的默认值保持一致。
+      - "16379:6379"
     volumes:
       - redis-data:/data
     healthcheck:

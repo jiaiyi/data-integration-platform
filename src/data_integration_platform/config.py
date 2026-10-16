@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     checkpoint_database_url: str = (
         "postgresql://dip_checkpoint:dip_checkpoint@localhost:5432/dip_checkpoint"
     )
-    redis_url: str = "redis://localhost:6379/0"
+    # 与 infra/compose.yaml 的端口发布保持一致：宿主 6379 常被本机原生 Redis 占用，
+    # 那种情况下 Docker 不报错、只是端口发布静默失效，连上去的是另一个 Redis。
+    redis_url: str = "redis://localhost:16379/0"
 
     # ---- 可观测 ----
     otel_enabled: bool = False

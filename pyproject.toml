@@ -63,6 +63,9 @@ line-length = 100
 target-version = "py312"
 # prototype/ 是设计交付物（原型生成脚本），不属于服务端源码，不纳入本项目的 lint/format 范围。
 extend-exclude = ["prototype"]
+# 默认 force_exclude=false，显式传路径会绕过 exclude —— 即 `ruff format prototype/` 仍会改到原型脚本。
+# 置为 true 让 exclude 对显式路径同样生效，避免误格式化设计交付物。
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]

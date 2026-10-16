@@ -84,8 +84,20 @@ docker compose -f infra/compose.yaml --profile e2e up -d --no-build --pull never
 uv run alembic upgrade head
 ```
 
-端口：postgres `5432`、redis `6379`、mysql-e2e `13306`、Doris FE `8030/9030`、SeaTunnel REST `8080`。
-`5432` / `6379` 被占用会导致容器创建阶段直接失败，先排查再启动。
+端口：postgres `5432`、redis **`16379`**（容器内仍是 6379）、mysql-e2e `13306`、
+Doris FE `8030/9030`、SeaTunnel REST `8080`。
+
+**redis 为什么发布到 16379**：宿主机 6379 常被本机原生 Redis 占用，而 Docker 在这种情况下**不报错** ——
+容器照样 `Up (healthy)`，只是端口发布静默失效（`docker inspect` 里 `NetworkSettings.Ports` 为空、
+`docker compose port redis 6379` 返回 `:0`），此时 `redis://localhost:6379` 连到的是那个原生 Redis，
+不是容器。改用 16379 后与 `DIP_REDIS_URL` 默认值一致，且不干扰本机既有服务。
+启动后核对发布是否生效（这条排查对任何端口冲突都适用）：
+
+```bash
+docker compose -f infra/compose.yaml port redis 6379   # 期望 0.0.0.0:16379；返回 :0 即发布未生效
+docker ps --format "{{.Names}} {{.Ports}}"             # 期望 0.0.0.0:16379->6379/tcp
+```
+
 
 ## 验证
 
