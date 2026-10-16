@@ -142,6 +142,15 @@ class Settings(BaseSettings):
     )
     harness_preparation_ttl_seconds: int = Field(default=86_400, ge=300, le=604_800)
     harness_capability_ttl_seconds: int = Field(default=300, ge=30, le=900)
+    # 分离签名（T-28）：私钥只给签发方（API / 授权服务），执行方只挂公钥映射。
+    # 两者都是 base64url 的裸 32 字节；公钥映射写成 `key_id:密钥,key_id:密钥`
+    # 以便轮换期间旧令牌仍可验签。
+    harness_signing_key_id: str = Field(default="harness-local-1", min_length=1, max_length=128)
+    harness_signing_private_key: SecretStr | None = None
+    harness_signing_public_keys: str = ""
+    # 事务 Outbox（T-30）：租约到期后命令重新可领；重试到上限即判失败，不再无限重投。
+    harness_outbox_lease_seconds: int = Field(default=60, ge=5, le=3600)
+    harness_outbox_max_attempts: int = Field(default=5, ge=1, le=100)
     harness_runtime_max_records: int = Field(default=10_000_000, ge=1, le=10_000_000_000)
     harness_runtime_max_bytes: int = Field(default=10 * 1024**3, ge=1024, le=10 * 1024**4)
     harness_runtime_timeout_seconds: int = Field(default=3600, ge=60, le=604_800)
@@ -171,6 +180,14 @@ class Settings(BaseSettings):
             warning_ratio=self.harness_runtime_warning_ratio,
         )
 
+    def harness_public_key_ids(self) -> frozenset[str]:
+        """公钥映射里的 key_id 集合；格式错误的条目直接跳过（启动期另有校验拦下）。"""
+        return frozenset(
+            key_id.strip()
+            for item in self.harness_signing_public_keys.split(",")
+            if (key_id := item.partition(":")[0].strip()) and ":" in item
+        )
+
     def allowed_rest_api_hosts(self) -> frozenset[str]:
         """解析出口主机白名单；大小写不敏感，空配置表示不放行任何主机。"""
         return _parse_host_list(self.rest_api_allowed_hosts)
@@ -198,7 +215,34 @@ class Settings(BaseSettings):
             raise ValueError("首次初始化 Token 至少需要 32 字节")
         self._require_credential_governance_boundaries()
         self._require_generation_boundaries()
+        self._require_harness_signing_boundaries()
         return self
+
+    def _require_harness_signing_boundaries(self) -> None:
+        """签名材料的部署边界（T-28 / FR-45）。
+
+        生产环境必须有公钥映射：没有公钥就无法验签，任何写操作都该被拒（T-32），
+        那等于整个平台不可用 —— 与其等到第一个写请求才炸，不如启动期就拒绝。
+
+        **不要求私钥**：执行方（Worker）按设计只挂公钥，要求它配私钥会把
+        「Producer 才能签发」这条边界直接抹掉。
+        """
+        raw = self.harness_signing_public_keys.strip()
+        if not raw:
+            if self.is_production:
+                raise ValueError("生产环境必须配置 DIP_HARNESS_SIGNING_PUBLIC_KEYS")
+            return
+        for item in (part.strip() for part in raw.split(",")):
+            if not item:
+                continue
+            key_id, separator, value = item.partition(":")
+            if not separator or not key_id or not value:
+                raise ValueError(
+                    f"DIP_HARNESS_SIGNING_PUBLIC_KEYS 的条目应为 `key_id:base64url`：{item!r}"
+                )
+        private_key = self.harness_signing_private_key
+        if private_key is not None and len(private_key.get_secret_value()) < 16:
+            raise ValueError("签名私钥不像是 base64url 的 32 字节裸密钥，请检查配置")
 
     def _require_generation_boundaries(self) -> None:
         """逐行 LLM Transform 的开启边界（FR-33 / 决策 Q7）。

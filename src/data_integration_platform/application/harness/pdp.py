@@ -22,7 +22,7 @@ PDP 不调模型、不做 I/O，因此可以在 20ms 的非 LLM 预算里跑完�
 决策里记录的 `policy_bundle_version` + 命中规则就是可追溯的那部分。
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from data_integration_platform.application.harness.tools import ToolSpec
@@ -36,22 +36,16 @@ from data_integration_platform.domain.harness import (
     ToolIntent,
     ToolIntentOutcome,
     ToolManifest,
+    sensitivity_rank,
 )
 
 # 环境取值；生产口径与 `config.PRODUCTION_ENVIRONMENTS` 一致。
 PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production"})
 KNOWN_ENVIRONMENTS = frozenset({"local", "dev", "staging"}) | PRODUCTION_ENVIRONMENTS
 
-# 数据分级的保守序；`UNKNOWN` 按**受限**处理 —— 见 `_conservative_rank`。
-_SENSITIVITY_RANK: Mapping[DataSensitivity, int] = {
-    DataSensitivity.PUBLIC: 0,
-    DataSensitivity.INTERNAL: 1,
-    DataSensitivity.CONFIDENTIAL: 2,
-    DataSensitivity.RESTRICTED: 3,
-    DataSensitivity.SECRET: 4,
-}
-_CONFIDENTIAL_RANK = _SENSITIVITY_RANK[DataSensitivity.CONFIDENTIAL]
-_SECRET_RANK = _SENSITIVITY_RANK[DataSensitivity.SECRET]
+# 分级序位只有一份，在 `domain/harness.py`；分类报告算总级用的也是它。
+_CONFIDENTIAL_RANK = sensitivity_rank(DataSensitivity.CONFIDENTIAL)
+_SECRET_RANK = sensitivity_rank(DataSensitivity.SECRET)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,18 +70,6 @@ class PolicyRule:
     rule_id: str
     description: str
     matches_and_decides: Callable[[ToolIntent, ToolManifest], RuleVerdict | None]
-
-
-def _conservative_rank(sensitivity: DataSensitivity) -> int:
-    """把分级折算成保守序位。
-
-    `UNKNOWN` 取**受限**（第二高）而不是秘密：分类缺失是常态（分类器本身也是
-    决策输入之一），按秘密处理会让任何未分类数据都彻底出不了门，系统直接不可用；
-    取受限则强制走安全审批槽 —— 既不静默放行，也不把「还没分类」当成「不能干活」。
-    """
-    if sensitivity is DataSensitivity.UNKNOWN:
-        return _SENSITIVITY_RANK[DataSensitivity.RESTRICTED]
-    return _SENSITIVITY_RANK[sensitivity]
 
 
 # ------------------------------------------------------------------ 规则表
@@ -137,7 +119,7 @@ def _secret_egress(intent: ToolIntent, manifest: ToolManifest) -> RuleVerdict | 
     """秘密级数据外发：**不可审批放行**，直接拒绝（PRD FR-42 验收）。"""
     if (
         intent.effect is ToolEffect.EXTERNAL_EGRESS
-        and _conservative_rank(intent.data_sensitivity) >= _SECRET_RANK
+        and sensitivity_rank(intent.data_sensitivity) >= _SECRET_RANK
     ):
         return RuleVerdict(
             outcome=ToolIntentOutcome.DENY,
@@ -151,10 +133,7 @@ def _sensitive_egress(intent: ToolIntent, manifest: ToolManifest) -> RuleVerdict
     """其余外发：分级越高越严。受限及以上要安全审批槽，公开/内部只需数据审批槽。"""
     if intent.effect is not ToolEffect.EXTERNAL_EGRESS:
         return None
-    sensitive = (
-        _conservative_rank(intent.data_sensitivity)
-        >= _SENSITIVITY_RANK[DataSensitivity.CONFIDENTIAL]
-    )
+    sensitive = sensitivity_rank(intent.data_sensitivity) >= _CONFIDENTIAL_RANK
     return RuleVerdict(
         outcome=ToolIntentOutcome.REQUIRE_APPROVAL,
         risk_level=RiskLevel.P1 if sensitive else RiskLevel.P2,

@@ -259,6 +259,35 @@ class ToolManifest:
         return canonical_sha256(self.canonical_payload())
 
 
+# -------------------------------------------------------------- 分级序位
+# 从宽到严的**唯一**排序口径。`UNKNOWN` 刻意排在「受限」之后、「秘密」之前：
+# 分类缺失比「已知机密」更该被盯着，但把它等同于秘密会让任何未分类数据都被彻底
+# 拒之门外 —— 分类器本身也是决策输入之一，缺失是常态而不是异常。
+#
+# 这条序位是 PDP 判风险与分类报告算总级**共用的同一份**：两处各写一遍，
+# 迟早会出现「同一份 UNKNOWN 在一处按受限、在另一处按秘密」。
+SENSITIVITY_ORDER: tuple[DataSensitivity, ...] = (
+    DataSensitivity.PUBLIC,
+    DataSensitivity.INTERNAL,
+    DataSensitivity.CONFIDENTIAL,
+    DataSensitivity.RESTRICTED,
+    DataSensitivity.UNKNOWN,
+    DataSensitivity.SECRET,
+)
+
+
+def sensitivity_rank(sensitivity: DataSensitivity) -> int:
+    """分级在保守序位上的位置；数值越大越敏感。"""
+    return SENSITIVITY_ORDER.index(sensitivity)
+
+
+def stricter_of(*values: DataSensitivity) -> DataSensitivity:
+    """取更严的一档；空输入按 `SECRET` 处理 —— 问不出分级时不能默认宽松。"""
+    if not values:
+        return DataSensitivity.SECRET
+    return max(values, key=sensitivity_rank)
+
+
 # ------------------------------------------------------ 职责分离强制规则
 def require_no_self_approval(*, applicant_id: str, approver_id: str) -> None:
     """SOD-01：申请人禁止自批。"""
