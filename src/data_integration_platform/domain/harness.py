@@ -117,12 +117,17 @@ class ResourceScope:
 
 @dataclass(frozen=True, slots=True)
 class ToolIntent:
-    """一次副作用意图的规范描述，是 PDP 的唯一输入。"""
+    """一次副作用意图的规范描述，是 PDP 的唯一输入。
+
+    `subject_project_id` 与 `scope.project_id` **必须并列出现**：只凭资源所属项目
+    无法判断「这是不是跨项目访问」——跨项目正是两者的差集（SPEC §8.1）。
+    """
 
     tool_name: str
     tool_version: str
     effect: ToolEffect
     subject_id: str
+    subject_project_id: str
     scope: ResourceScope
     environment: str
     data_sensitivity: DataSensitivity = DataSensitivity.UNKNOWN
@@ -133,6 +138,7 @@ class ToolIntent:
             "tool_version": self.tool_version,
             "effect": self.effect.value,
             "subject_id": self.subject_id,
+            "subject_project_id": self.subject_project_id,
             "environment": self.environment,
             "data_sensitivity": self.data_sensitivity.value,
             "scope": self.scope.canonical_payload(),

@@ -40,6 +40,7 @@ def intent(**overrides: object) -> ToolIntent:
         "tool_version": "2.3.13",
         "effect": ToolEffect.WRITE,
         "subject_id": "22222222-2222-2222-2222-222222222222",
+        "subject_project_id": "11111111-1111-1111-1111-111111111111",
         "scope": scope(),
         "environment": "local",
         "data_sensitivity": DataSensitivity.CONFIDENTIAL,
