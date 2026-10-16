@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "data-integration-platform"
+version = "0.1.0"
+description = "生产级 ETL-Agent 数据集成平台控制面"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<1",
+    "celery[redis]>=5.5,<6",
+    "fastapi>=0.116,<1",
+    "httpx>=0.28,<1",
+    "opentelemetry-api>=1.37,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.37,<2",
+    "opentelemetry-instrumentation-celery>=0.58b0,<1",
+    "opentelemetry-instrumentation-fastapi>=0.58b0,<1",
+    "opentelemetry-instrumentation-httpx>=0.58b0,<1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.58b0,<1",
+    "opentelemetry-sdk>=1.37,<2",
+    "pydantic-settings>=2.10,<3",
+    "redis>=5,<7",
+    "sqlalchemy[asyncio]>=2.0.41,<3",
+    "structlog>=25,<26",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.21,<1",
+    "mypy>=1.17,<2",
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.1,<2",
+    "pytest-cov>=6.2,<7",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+dip-api = "data_integration_platform.main:run"
+dip-worker = "data_integration_platform.worker:run"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_integration_platform"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "simulation_l0: 无外部副作用的静态策略、权限与制品攻击仿真",
+    "simulation_l1: 仅在模拟器内注入故障、重放、超时和部分成功",
+    "simulation_l2: 需要开发 Compose 的真实 MySQL/文件、SeaTunnel 与 Doris 链路",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# prototype/ 是设计交付物（原型生成脚本），不属于服务端源码，不纳入本项目的 lint/format 范围。
+extend-exclude = ["prototype"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = [
+    "B008",   # FastAPI 官方推荐在参数默认值中使用 Depends。
+    "RUF001", # 中文业务文案需要全角标点。
+    "RUF002",
+    "RUF003",
+    "UP047",  # 当前保持 Python 3.12 也易读的 TypeVar 写法。
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["data_integration_platform"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "celery.*"]
+ignore_missing_imports = true

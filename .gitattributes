@@ -1,0 +1,34 @@
+# 统一换行符，避免 Windows / Linux 之间产生整文件 diff 噪声
+* text=auto eol=lf
+
+# 文本文件显式声明
+*.py    text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.ts    text eol=lf
+*.vue   text eol=lf
+*.sql   text eol=lf
+*.sh    text eol=lf
+*.hcl   text eol=lf
+Dockerfile text eol=lf
+
+# 二进制文件不做换行转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.svg   text eol=lf
+*.whl   binary
+*.tar.gz binary
+
+# Windows 脚本保留 CRLF（如需提交 .bat/.ps1）
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# 锁定文件在合并时按本地版本处理，避免冲突噪声
+uv.lock             merge=ours
+frontend/package-lock.json merge=ours

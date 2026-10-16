@@ -1,0 +1,167 @@
+name: data-integration-platform
+
+# 基础依赖（默认启动，对应 Docker镜像/生产级ETL-Agent-v0.1.0-基础镜像.tar.gz）
+#   docker compose -f infra/compose.yaml up -d
+# 真实链路依赖（e2e profile，对应 E2E扩展镜像.tar.gz）
+#   docker compose -f infra/compose.yaml --profile e2e up -d --no-build --pull never
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: dip
+      POSTGRES_PASSWORD: dip
+      POSTGRES_DB: dip
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # 首次创建数据卷时建 LangGraph Checkpoint 独立库（ENV-01：不替代迁移）。
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/10-checkpoint.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dip -d dip"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---- 以下服务只在 --profile e2e 下创建（ENV-04）----
+
+  mysql-e2e:
+    image: mysql:8.4
+    profiles: ["e2e"]
+    environment:
+      MYSQL_ROOT_PASSWORD: root_e2e
+      MYSQL_DATABASE: source_db
+      MYSQL_USER: dip_reader
+      MYSQL_PASSWORD: dip_reader_e2e
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-e2e-data:/var/lib/mysql
+      - ./e2e/mysql-init.sql:/docker-entrypoint-initdb.d/10-orders.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot_e2e --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  doris-fe:
+    image: apache/doris:fe-3.0.8
+    profiles: ["e2e"]
+    hostname: doris-fe
+    environment:
+      FE_SERVERS: "fe1:172.30.80.2:9010"
+      FE_ID: "1"
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    volumes:
+      - doris-fe-data:/opt/apache-doris/fe/doris-meta
+      - doris-fe-log:/opt/apache-doris/fe/log
+    networks:
+      doris-network:
+        ipv4_address: 172.30.80.2
+
+  doris-be:
+    image: apache/doris:be-3.0.8
+    profiles: ["e2e"]
+    hostname: doris-be
+    environment:
+      FE_SERVERS: "fe1:172.30.80.2:9010"
+      BE_ADDR: "172.30.80.3:9050"
+    ports:
+      - "8040:8040"
+    volumes:
+      - doris-be-data:/opt/apache-doris/be/storage
+      - doris-be-log:/opt/apache-doris/be/log
+    depends_on:
+      - doris-fe
+    networks:
+      doris-network:
+        ipv4_address: 172.30.80.3
+
+  # Doris FE 起来不等于业务可用（ENV-07）：仍要等 MySQL 协议查询成功并建库建表。
+  doris-init:
+    image: mysql:8.4
+    profiles: ["e2e"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until mysql -hdoris-fe -P9030 -uroot -e 'SELECT 1'; do sleep 3; done;
+        until mysql -hdoris-fe -P9030 -uroot < /init/doris-init.sql; do sleep 3; done
+    volumes:
+      - ./e2e/doris-init.sql:/init/doris-init.sql:ro
+    depends_on:
+      - doris-fe
+      - doris-be
+    networks:
+      - doris-network
+
+  # master 与 worker 复用同一镜像（ENV-05），镜像预装 JDBC/Doris/LocalFile/HDFS-Hive Connector。
+  seatunnel-master:
+    image: flowpilot/seatunnel:2.3.13
+    profiles: ["e2e"]
+    hostname: seatunnel-master
+    environment:
+      ST_DOCKER_MEMBER_LIST: "seatunnel-master:5801,seatunnel-worker:5801"
+    entrypoint: ["/bin/sh", "-c", "/opt/seatunnel/bin/seatunnel-cluster.sh -r master"]
+    ports:
+      - "15801:5801"
+      - "8080:8080"
+    volumes:
+      # 受管文件以规范化副本只读挂载，上传的原始文件不直接暴露给执行引擎。
+      - ../var/file-assets:/data/file-assets:ro
+      # L2 冻结样本走独立只读路径，避免在已只读挂载目录下叠加子挂载。
+      - ./e2e/file-order-logs.jsonl:/data/e2e-fixtures/file-order-logs.jsonl:ro
+    depends_on:
+      mysql-e2e:
+        condition: service_healthy
+      doris-init:
+        condition: service_completed_successfully
+    networks:
+      - default
+      - doris-network
+
+  seatunnel-worker:
+    image: flowpilot/seatunnel:2.3.13
+    profiles: ["e2e"]
+    hostname: seatunnel-worker
+    environment:
+      ST_DOCKER_MEMBER_LIST: "seatunnel-master:5801,seatunnel-worker:5801"
+    entrypoint: ["/bin/sh", "-c", "/opt/seatunnel/bin/seatunnel-cluster.sh -r worker"]
+    volumes:
+      - ../var/file-assets:/data/file-assets:ro
+      - ./e2e/file-order-logs.jsonl:/data/e2e-fixtures/file-order-logs.jsonl:ro
+    depends_on:
+      - seatunnel-master
+    networks:
+      - default
+      - doris-network
+
+volumes:
+  postgres-data:
+  redis-data:
+  mysql-e2e-data:
+  doris-fe-data:
+  doris-fe-log:
+  doris-be-data:
+  doris-be-log:
+
+networks:
+  doris-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.80.0/24

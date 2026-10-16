@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.env
+var/
+*.jsonl.tmp
+
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ---- 离线镜像附件：基础 ≈155 MB + E2E 扩展 ≈7.6 GB，共 7.3 GB，不随仓库分发 ----
+# 需要时从课程附件另行获取，按 README 的加载说明使用。
+Docker镜像/
+
+# ---- 第三方课程资料：仅本地参考，不公开发布 ----
+大模型就业项目实战.md

@@ -1,0 +1,162 @@
+/* 设计令牌取自 prototype/penlib.py，两处必须保持一致。 */
+:root {
+  --dip-bg: #f4f6f9;
+  --dip-card: #ffffff;
+  --dip-border: #e3e8ef;
+  --dip-border-strong: #cbd5e1;
+  --dip-text: #111827;
+  --dip-sub: #5b6472;
+  --dip-muted: #98a2b3;
+
+  --dip-primary: #2563eb;
+  --dip-primary-soft: #eff6ff;
+  --dip-green: #059669;
+  --dip-green-soft: #ecfdf5;
+  --dip-amber: #b45309;
+  --dip-amber-soft: #fffbeb;
+  --dip-red: #dc2626;
+  --dip-red-soft: #fef2f2;
+  --dip-purple: #7c3aed;
+  --dip-purple-soft: #f5f3ff;
+  --dip-teal: #0d9488;
+  --dip-teal-soft: #f0fdfa;
+
+  --dip-sidebar-width: 228px;
+  --dip-topbar-height: 70px;
+
+  color-scheme: light;
+  font-family: 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--dip-text);
+  background: var(--dip-bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--dip-bg);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--dip-primary);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* 控件 */
+.dip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--dip-primary);
+  color: #ffffff;
+}
+
+.dip-btn--ghost {
+  background: var(--dip-card);
+  color: var(--dip-sub);
+  border-color: var(--dip-border-strong);
+}
+
+.dip-btn:disabled {
+  background: #f1f5f9;
+  color: var(--dip-muted);
+  border-color: var(--dip-border);
+}
+
+.dip-select {
+  padding: 6px 10px;
+  border: 1px solid var(--dip-border);
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 11.5px;
+  color: var(--dip-sub);
+  max-width: 260px;
+}
+
+/* 表格 */
+.dip-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.dip-table thead th {
+  text-align: left;
+  padding: 9px 12px;
+  background: #f8fafc;
+  color: var(--dip-sub);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.dip-table tbody td {
+  padding: 9px 12px;
+  border-top: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+
+.dip-table tbody tr:hover {
+  background: #fbfcfe;
+}
+
+/* 未接入占位：明确标注由哪个里程碑填充，不用演示数值冒充真实事实。 */
+.dip-pending {
+  padding: 14px;
+  border: 1px dashed var(--dip-border-strong);
+  border-radius: 8px;
+  background: #fbfcfe;
+  color: var(--dip-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.dip-kv {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 8px 10px;
+  font-size: 11.5px;
+  align-items: start;
+}
+
+.dip-kv dt {
+  color: var(--dip-muted);
+}
+
+.dip-kv dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.dip-mono {
+  font-family: Consolas, 'Courier New', monospace;
+}
