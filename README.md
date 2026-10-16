@@ -6,6 +6,9 @@
 需求与设计依据：[`specs/PRD.md`](specs/PRD.md)（v1.2）、[`specs/SPEC.md`](specs/SPEC.md)（v1.1）、
 [`prototype/README.md`](prototype/README.md)（高保真原型）。
 
+> **跨会话接手请先读 [`HANDOVER.md`](HANDOVER.md)** —— 那里有需求满足度对照（哪些刻意未满足）、
+> 下一步顺序、环境状态，以及只在开发过程中得出、不写下来就会被重新推翻的设计判断。
+
 ## 架构一句话
 
 **控制面 / 数据面分离 + 分层架构 + 确定性安全内核（Agent Harness）。**
@@ -135,7 +138,8 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | M0 工程基座 | T-01 工程骨架 / T-02 配置边界 / T-03 基础设施编排 / T-04 可观测基座 | 已完成 |
 | M1 领域与身份 | T-05 枚举与状态机 / T-06 Harness 值对象 / T-07 数据模型与迁移 / T-08 身份与项目治理 / T-09 职责分离强制 | 已完成 |
 | M2 受管数据上下文 | T-10 探查契约 / T-11 七个探查器 / T-12 ClickHouse(GAP-01) / T-13 脱敏 / T-14 SecretProvider / T-15 凭据全生命周期 / T-16 文件与对象存储(GAP-02) / T-17 REST API(GAP-03) | 已完成 |
-| M3 生成与制品治理 | T-18 ~ T-23 | 待开工 |
+| M3 生成与制品治理 | T-18 生成契约与直连后端 / T-19 LangGraph 状态机 / T-20 确定性门禁 | 进行中 |
+| M3 余项 | T-21 真实引擎检查 / T-22 不可变版本与 Artifact / T-23 调度策略 / 生成链路 API 与 Worker 接线 | 待开工 |
 | M4 Harness 安全内核 | T-24 ~ T-32 | 待开工 |
 | M5 三阶段协议与执行 | T-33 ~ T-40 | 待开工 |
 | M6 质量、监督与治理 | T-41 ~ T-46 | 待开工 |
