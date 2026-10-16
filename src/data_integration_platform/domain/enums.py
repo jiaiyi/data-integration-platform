@@ -274,6 +274,11 @@ class AuditEventType(StrEnum):
     PROFILE_COMPLETED = "PROFILE_COMPLETED"
     FILE_ASSET_UPLOADED = "FILE_ASSET_UPLOADED"
     FILE_ASSET_DELETED = "FILE_ASSET_DELETED"
+    # 管道版本：冻结是不可回退的内容事实，单独成一类；修订另记一条，便于区分
+    # 「新开了版本」与「往已有版本里写内容」（后者只可能发生在冻结之前）。
+    PIPELINE_VERSION_CREATED = "PIPELINE_VERSION_CREATED"
+    PIPELINE_VERSION_REVISED = "PIPELINE_VERSION_REVISED"
+    PIPELINE_VERSION_FROZEN = "PIPELINE_VERSION_FROZEN"
     # 凭据治理：四类受管副作用各自记录「申请 / 决策 / 执行」三个阶段，
     # 阶段粒度保留在事件类型里，便于按阶段筛查而不用解析摘要。
     SECRET_MIGRATION_REQUESTED = "SECRET_MIGRATION_REQUESTED"

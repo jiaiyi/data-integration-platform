@@ -8,15 +8,15 @@
 
 ## 1. 一句话现状
 
-M0 / M1 / M2 **已完成并真实验证**；M3 做到一大半（T-18 生成契约 + T-19 状态机 + T-20 确定性门禁 +
-T-21 真实引擎检查已完成，且引擎检查已对真实 SeaTunnel 2.3.13 跑通），
-剩 T-22 不可变版本、T-23 调度，以及生成链路的 API 与 Worker 接线。
+M0 / M1 / M2 **已完成并真实验证**；M3 只剩尾巴（T-18 ~ T-22 已完成，
+其中 T-21 引擎检查已对真实 SeaTunnel 2.3.13 跑通），
+剩 T-23 调度，以及生成链路的 API 与 Worker 接线。
 
 接手时先确认仓库是好的：
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-uv run pytest                    # 期望 407 passed
+uv run pytest                    # 期望 416 passed
 docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在跑
 ```
 
@@ -73,11 +73,21 @@ Port + Adapter，没有做注册表** —— 执行引擎只有 SeaTunnel 一家
 提交时的作业解析阶段。确定性门禁不过时**不再外呼引擎**（候选已被拒，省一次外部调用，
 也免得修复提示被引擎结论挤掉）。
 
-### 第二步：T-22 不可变版本与 Artifact
+### 第二步：T-22 不可变版本与 Artifact —— 已完成
 
-`artifact_root` 配置已就位。要点：冻结 HOCON + EtlPlan 为不可变产物并算 SHA256；
-**需求变更创建 V+1，不覆盖旧版本**（FR-39）；状态机流转走 `domain/state_machine.py`
-（跳步/非法回退/终态重启都会被 `InvalidStateTransition` 拒绝，已有测试）。
+`application/versions.py::PipelineVersionService`：`create`（含续用同名管道的版本序列）、
+`revise`（V+1，挂 `parent_version_id`，**不触碰父版本**）、`freeze`、`artifacts_of`、`read_artifact`。
+
+冻结落三份制品：`HOCON`（原样字节）、`ETL_PLAN`、`REVIEW_VIEW`（plan 的纯投影）。
+`version.artifact_sha256 = canonical_sha256(candidate.canonical_payload())`，
+即 plan + hocon 的规范摘要 —— 审查视图是二者的确定性投影，所以摘要覆盖它而不用单独入摘要。
+
+关键约束（松掉任何一条，US-09「审批人看到的就是将要执行的内容」就只是口号）：
+- `freeze` **只接受 `GENERATED`**，由状态机迁到 `VALIDATED`；DRAFT 直接冻结会被
+  `InvalidStateTransition` 拒（跳步），已冻结的再冻结会被 `DomainError` 拒（不可重入）。
+- **落盘不是不可变性的执行边界**：真正挡住改写的是上面的状态检查与
+  `pipeline_artifacts(version_id, artifact_type)` 的唯一约束。文件系统只负责存字节。
+- 制品路径 `<artifact_root>/<project_id>/<version_id>/<TYPE>.<ext>`。
 
 ### 第三步：T-23 调度策略
 
