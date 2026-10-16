@@ -75,6 +75,52 @@ def candidate(*, hocon: str = HOCON, table: str = "orders_wide") -> GeneratedCan
     return GeneratedCandidate.model_validate({"plan": plan, "hocon": hocon})
 
 
+async def ensure_execution_endpoints(session: AsyncSession, project: ProjectContext) -> None:
+    """给 `candidate()` 的计划建好能被服务端解析出的源/目标连接与 Profile。
+
+    Prepare 阶段要按计划里的库表**查实**连接（执行阶段靠它取凭据），
+    因此计划里写的那两张表必须在项目内各有一条就绪的 Profile 与连接。
+    """
+    from data_integration_platform.domain.enums import (
+        ConnectionStatus,
+        ConnectorType,
+        DataEndpointRole,
+        DataProfileStatus,
+    )
+    from data_integration_platform.infrastructure.models import DataConnection, DataProfile
+
+    for connector, role, schema_name, table_name in (
+        (ConnectorType.MYSQL, DataEndpointRole.SOURCE, "source_db", "orders"),
+        (ConnectorType.DORIS, DataEndpointRole.SINK, "dw", "orders_wide"),
+    ):
+        connection = DataConnection(
+            project_id=project.project_id,
+            name=f"{connector.value.lower()}-{uuid.uuid4().hex[:6]}",
+            connector_type=connector,
+            endpoint_role=role,
+            status=ConnectionStatus.READY,
+            host="127.0.0.1",
+            port=13306,
+            database_name=schema_name,
+            options={},
+            created_by=project.engineer_id,
+        )
+        session.add(connection)
+        await session.flush()
+        session.add(
+            DataProfile(
+                connection_id=connection.id,
+                schema_name=schema_name,
+                table_name=table_name,
+                endpoint_role=role,
+                status=DataProfileStatus.READY,
+                columns=[{"name": "id", "type": "bigint"}],
+                primary_keys=["id"],
+            )
+        )
+    await session.flush()
+
+
 @pytest.fixture
 def service(tmp_path: Path) -> PipelineVersionService:
     return PipelineVersionService(root=tmp_path / "artifacts")

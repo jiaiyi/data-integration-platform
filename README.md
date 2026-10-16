@@ -131,6 +131,7 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | SeaTunnel REST 按旧文档写 `/hazelcast/rest/maps/*` 全 404 | 2.3.13 的端点挂在**根**下（`/overview`、`/running-jobs`、`/encrypt-config`…）。另外 CLI 的 `--check` 校验的是**集群配置**、对作业配置是空操作，没有作业级 dry-run |
 | `/encrypt-config` 收 HOCON 文本一律回 `Invalid JSON format in request body.` | 该接口只吃 JSON 配置文档，且 `source`/`transform`/`sink` 必须是**插件对象数组**（传对象会报 `LinkedHashMap cannot be cast to ArrayList`）。候选 HOCON 由 `pyhocon` 转换后再送引擎 |
 | Worker 报 `Psycopg cannot use the 'ProactorEventLoop'` | Windows 上 asyncpg 与 psycopg **只能取交集**：asyncpg 两种循环都能跑，psycopg（LangGraph 的 Checkpoint 库）明确拒绝 Proactor。`asyncio_compat` 因此改用 `WindowsSelectorEventLoopPolicy` |
+| 引擎 `/submit-job` 回 500 且消息为空 | `format` 是**查询参数**、请求体是 **HOCON 原文**。塞进 JSON 字段会落到引擎自己会 NPE 的分支。另外 HOCON 同一行连写多个字段也会解析失败 |
 | Celery 任务报 `This event loop is already running` | 在**已经是协程**的函数里调用 `run_in_transaction`（它内部走 `run_async` → `run_until_complete`）会二次进同一个循环。协程内部直接开会话，不要绕回同步桥接 |
 | Outbox 的重试上限永远触发不了 | 领用用的是 SQL 侧自增 `attempts = attempts + 1`，会话里的对象还是旧值。再查一次时要加 `populate_existing=True` |
 | 提交/回滚后读 ORM 属性抛 `MissingGreenlet` | 对象过期后再读属性会触发**同步**惰性加载。要用的主键在提交前先取出来 |
@@ -145,6 +146,7 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | M1 领域与身份 | T-05 枚举与状态机 / T-06 Harness 值对象 / T-07 数据模型与迁移 / T-08 身份与项目治理 / T-09 职责分离强制 | 已完成 |
 | M2 受管数据上下文 | T-10 探查契约 / T-11 七个探查器 / T-12 ClickHouse(GAP-01) / T-13 脱敏 / T-14 SecretProvider / T-15 凭据全生命周期 / T-16 文件与对象存储(GAP-02) / T-17 REST API(GAP-03) | 已完成 |
 | M3 生成与制品治理 | T-18 生成契约 / T-19 状态机 / T-20 确定性门禁 / T-21 真实引擎检查 / T-22 不可变版本 / T-23 调度策略 / 生成链路 API 与 Worker 接线 | **已完成** |
+| M5 三阶段协议与执行 | T-33 Prepare / T-34 Approve / T-35 Commit / T-37 Worker 验签 / T-38 SeaTunnel 对接 / T-39 Beat 完成；T-36 通用副作用框架 / T-40 交付 / 执行 API 待做 | 进行中 |
 | M4 Harness 安全内核 | T-24 工具契约清单 / T-25 PDP / T-26 数据分类 / T-27 Tool Broker / T-28 Capability 签名 / T-29 Replay Guard / T-30 事务 Outbox / T-31 证据账本 / T-32 失败关闭 | **已完成** |
 | M5 三阶段协议与执行 | T-33 ~ T-40 | 待开工 |
 | M6 质量、监督与治理 | T-41 ~ T-46 | 待开工 |

@@ -46,7 +46,8 @@ plan 的字段（全部必填，除非标注可选）：
 2. 目标表有主键时**必须**给出 dedup_keys，否则方案不完整。
 3. 每条质量规则都要有唯一的 error_code，且该错误码必须出现在 hocon 里。
 4. WATERMARK_INCREMENTAL 模式必须给出 watermark_column，且该列要在源端字段中。
-5. **hocon 里绝不能出现明文口令**，只能用 ${SECRET_NAME} 形式的占位符。
+5. **hocon 里绝不能出现明文口令**，只能用上下文「可用凭据占位符」里**列出的那些名字**；
+   自己编的名字会被平台拒绝（执行阶段没有对应凭据可替换）。
 6. 逐行 LLM Transform（kind=ROW_LLM）默认关闭，不要主动使用。
 7. hocon 必须是**单一闭合配置块**：env / source / transform / sink 各一段，花括号配平。
 

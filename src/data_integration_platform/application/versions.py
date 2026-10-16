@@ -22,6 +22,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,13 +34,18 @@ from data_integration_platform.application.audit import record_audit_event
 from data_integration_platform.application.generation import GeneratedCandidate
 from data_integration_platform.config import get_settings
 from data_integration_platform.domain.enums import (
+    ApprovalDecisionValue,
     ApprovalStatus,
     AuditEventType,
     PipelineVersionStatus,
     ProjectRole,
 )
-from data_integration_platform.domain.errors import DomainError, ResourceNotFound
-from data_integration_platform.domain.harness import canonical_json, canonical_sha256
+from data_integration_platform.domain.errors import DomainError, ResourceNotFound, VersionConflict
+from data_integration_platform.domain.harness import (
+    canonical_json,
+    canonical_sha256,
+    require_no_self_approval,
+)
 from data_integration_platform.domain.state_machine import require_pipeline_transition
 from data_integration_platform.infrastructure.models import (
     ApprovalRequest,
@@ -53,6 +59,9 @@ WRITABLE = frozenset({ProjectRole.ADMIN, ProjectRole.DATA_ENGINEER})
 READABLE = frozenset(
     {ProjectRole.ADMIN, ProjectRole.DATA_ENGINEER, ProjectRole.APPROVER, ProjectRole.VIEWER}
 )
+# 审批人槽位：审批是「批准别人做」，因此与提交者互斥由 SOD-01 单独把关，
+# 角色上只要求具备审批资格（ADMIN 天然具备）。
+APPROVERS = frozenset({ProjectRole.ADMIN, ProjectRole.APPROVER})
 
 # 制品类型与冻结时的落盘后缀。审查视图落成 JSON 而不是人类可读文本：
 # 审批界面（M7）要逐字段渲染，结构化文档比自然语言更不容易产生歧义。
@@ -283,6 +292,81 @@ class PipelineVersionService:
             change_summary={
                 "version_id": str(version.id),
                 "artifact_sha256": version.artifact_sha256,
+            },
+            trace_id=trace_id,
+        )
+        return request
+
+    async def decide_approval(
+        self,
+        session: AsyncSession,
+        *,
+        approval_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        decision: ApprovalDecisionValue,
+        reason: str,
+        trace_id: str | None = None,
+    ) -> ApprovalRequest:
+        """版本审批决策（US-13 的终点）：通过则版本可被执行准备引用，驳回则终止。
+
+        两条拒绝理由各自对应一类真实问题，不能混：
+
+        - **摘要对不上**：审批单绑的制品与版本现在的制品不是同一份 → 内容变过
+          （SOD-04）。这种审批即使点了「通过」也不该生效。
+        - **自己批自己**：申请人即审批人（SOD-01）。
+        """
+        request = await session.get(ApprovalRequest, approval_id)
+        if request is None:
+            raise ResourceNotFound("审批申请不存在")
+        version = await self._require_version(session, request.version_id)
+        pipeline = await session.get(Pipeline, version.pipeline_id)
+        if pipeline is None:
+            raise ResourceNotFound("管道不存在")
+        await require_project_roles(
+            session,
+            project_id=pipeline.project_id,
+            actor_id=actor_id,
+            allowed=APPROVERS,
+            write=True,
+        )
+        if request.status is not ApprovalStatus.PENDING:
+            raise DomainError(f"该审批申请已经是 {request.status.value}，不能重复决策")
+        if request.artifact_sha256 != version.artifact_sha256:
+            raise VersionConflict(
+                "审批单绑定的制品摘要与版本当前摘要不一致，内容在审批期间被改过，该审批已失效"
+            )
+        require_no_self_approval(applicant_id=str(request.requested_by), approver_id=str(actor_id))
+
+        target = (
+            PipelineVersionStatus.APPROVED
+            if decision is ApprovalDecisionValue.APPROVE
+            else PipelineVersionStatus.REJECTED
+        )
+        require_pipeline_transition(version.status, target)
+        request.status = (
+            ApprovalStatus.APPROVED
+            if decision is ApprovalDecisionValue.APPROVE
+            else ApprovalStatus.REJECTED
+        )
+        request.decision = decision
+        request.decided_by = actor_id
+        request.decided_at = datetime.now(UTC)
+        request.reason = reason
+        version.status = target
+        await session.flush()
+
+        record_audit_event(
+            session,
+            event_type=AuditEventType.PIPELINE_VERSION_DECIDED,
+            target_type="approval_request",
+            project_id=pipeline.project_id,
+            actor_id=actor_id,
+            target_id=str(request.id),
+            change_summary={
+                "version_id": str(version.id),
+                "decision": decision.value,
+                "artifact_sha256": request.artifact_sha256,
+                "reason": reason,
             },
             trace_id=trace_id,
         )

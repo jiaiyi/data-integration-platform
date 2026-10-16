@@ -293,7 +293,12 @@ def _ancestors_sensitivity(
 
 
 def _overall(fields: Sequence[FieldClassification]) -> DataSensitivity:
-    """整份 Schema 的分级取最高的字段 —— 表里有一个秘密字段，这张表就是秘密表。"""
+    """整份 Schema 的分级取最高的字段。
+
+    因为 `UNKNOWN` 的序位排在「受限」之上，**只要还有没分类的字段，整表就是 UNKNOWN**。
+    这是刻意的保守：连一半列是什么都不知道，却说「这张表只是机密级」，那是假保证。
+    想看清楚还差哪些列，看 `unresolved` —— 那条信息没有被丢掉，只是没有混进分级里。
+    """
     if not fields:
         return DataSensitivity.UNKNOWN
     return stricter_of(*(field.sensitivity for field in fields))

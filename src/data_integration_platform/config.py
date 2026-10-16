@@ -116,6 +116,9 @@ class Settings(BaseSettings):
 
     # ---- 数据面引擎（T-21）----
     seatunnel_api_url: AnyHttpUrl = Field(default=AnyHttpUrl("http://127.0.0.1:8080"))
+    # 引擎版本同时是工具清单里 `seatunnel.*` 的版本：写死会让「清单说 2.3.13、实际跑别的版本」
+    # 这种不一致再也查不出来（T-24 的版本不匹配检查就失效了）。
+    seatunnel_version: str = Field(default="2.3.13", min_length=1, max_length=64)
     seatunnel_timezone: str = Field(default="UTC", min_length=1, max_length=64)
     seatunnel_check_timeout_seconds: int = Field(default=60, ge=5, le=600)
 
@@ -151,6 +154,11 @@ class Settings(BaseSettings):
     # 事务 Outbox（T-30）：租约到期后命令重新可领；重试到上限即判失败，不再无限重投。
     harness_outbox_lease_seconds: int = Field(default=60, ge=5, le=3600)
     harness_outbox_max_attempts: int = Field(default=5, ge=1, le=100)
+    # 定时扫描（T-39）。这几个秒数属**可调实现参数**（PRD 决策 Q5），
+    # 验收只看「按间隔触发」这个行为，不核具体秒数。
+    worker_heartbeat_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    schedule_scan_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    harness_outbox_scan_interval_seconds: int = Field(default=2, ge=1, le=300)
     harness_runtime_max_records: int = Field(default=10_000_000, ge=1, le=10_000_000_000)
     harness_runtime_max_bytes: int = Field(default=10 * 1024**3, ge=1024, le=10 * 1024**4)
     harness_runtime_timeout_seconds: int = Field(default=3600, ge=60, le=604_800)

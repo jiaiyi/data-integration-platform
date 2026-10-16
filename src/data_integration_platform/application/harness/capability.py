@@ -15,6 +15,7 @@
 """
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -103,6 +104,49 @@ class CapabilityExpectation:
     resource_fingerprint: str
     supervision_contract_sha256: str
     data_classification_sha256: str
+
+
+def claims_from_payload(payload: Mapping[str, Any]) -> CapabilityClaims:
+    """把落库的声明体还原成值对象。
+
+    `claims` 列存的是 `canonical_payload()`，里面时间已是 ISO 字符串、风险等级已是字符串；
+    直接 `CapabilityClaims(**payload)` 会得到一个「看起来对、但 `.value` 会炸」的对象 ——
+    枚举与时间必须显式还原。
+    """
+    return CapabilityClaims(
+        token_id=str(payload["token_id"]),
+        preparation_id=str(payload["preparation_id"]),
+        tool_name=str(payload["tool_name"]),
+        tool_version=str(payload["tool_version"]),
+        subject_id=str(payload["subject_id"]),
+        environment=str(payload["environment"]),
+        artifact_sha256=str(payload["artifact_sha256"]),
+        input_fingerprint=str(payload["input_fingerprint"]),
+        resource_fingerprint=str(payload["resource_fingerprint"]),
+        supervision_contract_sha256=str(payload["supervision_contract_sha256"]),
+        data_classification_sha256=str(payload["data_classification_sha256"]),
+        policy_bundle_version=str(payload["policy_bundle_version"]),
+        risk_level=RiskLevel(str(payload["risk_level"])),
+        issued_at=datetime.fromisoformat(str(payload["issued_at"])),
+        expires_at=datetime.fromisoformat(str(payload["expires_at"])),
+        single_use=bool(payload["single_use"]),
+    )
+
+
+def token_from_grant(
+    *,
+    claims_payload: Mapping[str, Any],
+    algorithm: str,
+    key_id: str,
+    signature: str,
+) -> SignedCapability:
+    """按 `harness_capability_grants` 的列还原一张令牌，供执行方独立验签。"""
+    return SignedCapability(
+        claims=claims_from_payload(claims_payload),
+        algorithm=algorithm,
+        key_id=key_id,
+        signature=signature,
+    )
 
 
 def issue_capability(

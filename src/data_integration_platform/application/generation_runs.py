@@ -28,6 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from data_integration_platform.application.access import require_project_roles
 from data_integration_platform.application.audit import record_audit_event
 from data_integration_platform.application.generation import GeneratedCandidate
+from data_integration_platform.application.harness.placeholders import (
+    declared_names,
+)
 from data_integration_platform.application.policy import (
     SourceFacts,
     TargetFacts,
@@ -211,6 +214,8 @@ class GenerationRunService:
         source = _first_of_role(profiles, DataEndpointRole.SOURCE)
         target = _first_of_role(profiles, DataEndpointRole.SINK)
 
+        source_connection = await self._connection_of(session, source)
+        target_connection = await self._connection_of(session, target)
         return GenerationContext(
             run_id=run.id,
             version_id=version.id,
@@ -225,6 +230,20 @@ class GenerationRunService:
                 quality_contract=run.quality_contract,
                 incremental_contract=run.incremental_contract,
                 row_llm_contract=run.row_llm_contract,
+                # 占位符名字必须与执行阶段用的是**同一份**：模型照着这里写，
+                # 执行阶段照着这里替；两边各写一遍，模型写出来的名字到执行就成了「未登记」。
+                placeholders=sorted(
+                    declared_names(
+                        role=DataEndpointRole.SOURCE,
+                        connector_type=source_connection.connector_type,
+                        has_credentials=source_connection.secret_ref is not None,
+                    )
+                    | declared_names(
+                        role=DataEndpointRole.SINK,
+                        connector_type=target_connection.connector_type,
+                        has_credentials=target_connection.secret_ref is not None,
+                    )
+                ),
             ),
             source=facts_from_profile(
                 connector_type=await self._connector_of(session, source),
@@ -323,10 +342,13 @@ class GenerationRunService:
         )
 
     async def _connector_of(self, session: AsyncSession, profile: DataProfile) -> ConnectorType:
+        return (await self._connection_of(session, profile)).connector_type
+
+    async def _connection_of(self, session: AsyncSession, profile: DataProfile) -> DataConnection:
         connection = await session.get(DataConnection, profile.connection_id)
         if connection is None:
             raise ResourceNotFound("数据连接不存在")
-        return connection.connector_type
+        return connection
 
     async def _load_profiles(
         self, session: AsyncSession, *, project_id: uuid.UUID, ids: Sequence[uuid.UUID]
@@ -427,6 +449,7 @@ def _profile_context(
     quality_contract: Mapping[str, Any] | None,
     incremental_contract: Mapping[str, Any] | None,
     row_llm_contract: Mapping[str, Any] | None,
+    placeholders: Sequence[str] = (),
 ) -> str:
     """受管上下文文本。
 
@@ -445,6 +468,7 @@ def _profile_context(
         "# 目标端主键",
         ", ".join(target.primary_keys) or "（无）",
     ]
+    lines.extend(_placeholder_lines(placeholders))
     declared = {
         "工程师声明的质量契约": quality_contract,
         "工程师声明的增量契约": incremental_contract,
@@ -454,6 +478,18 @@ def _profile_context(
         if payload:
             lines.extend(["", f"# {title}", canonical_json(_without_pins(payload))])
     return "\n".join(lines)
+
+
+def _placeholder_lines(placeholders: Sequence[str]) -> list[str]:
+    """把可用占位符清单写进上下文。
+
+    只给**名字**不给值，而且要说清「不在清单里的名字不要用」—— 执行阶段只认这一份清单，
+    模型编出来的别的名字会让整份配置在提交前被拒。
+    """
+    if not placeholders:
+        return ["", "# 可用凭据占位符", "（本管道没有可用凭据，hocon 里不要出现 ${...}）"]
+    listed = "、".join(f"${{{name}}}" for name in placeholders)
+    return ["", "# 可用凭据占位符（hocon 里**只能**用这些，不要自己编名字）", listed]
 
 
 def _without_pins(payload: Mapping[str, Any]) -> dict[str, Any]:

@@ -22,7 +22,9 @@ celery_app = Celery(
     broker=settings.redis_url,
     backend=settings.redis_url,
     include=[
+        "data_integration_platform.beat_tasks",
         "data_integration_platform.connection_tasks",
+        "data_integration_platform.execution_tasks",
         "data_integration_platform.generation_tasks",
         "data_integration_platform.secret_migration_tasks",
         "data_integration_platform.secret_rotation_tasks",
@@ -55,6 +57,19 @@ celery_app.conf.update(
         "credential-expiry-alert-scan": {
             "task": _ALERT_SCAN_TASK,
             "schedule": float(settings.credential_alert_scan_interval_seconds),
+        },
+        # T-39 的四条定时扫描；间隔都是可调实现参数（PRD 决策 Q5）。
+        "worker-heartbeat": {
+            "task": "data_integration_platform.beat_tasks.worker_heartbeat",
+            "schedule": float(settings.worker_heartbeat_interval_seconds),
+        },
+        "schedule-scan": {
+            "task": "data_integration_platform.beat_tasks.scan_pipeline_schedules",
+            "schedule": float(settings.schedule_scan_interval_seconds),
+        },
+        "outbox-dispatch-scan": {
+            "task": "data_integration_platform.beat_tasks.dispatch_pending_commands",
+            "schedule": float(settings.harness_outbox_scan_interval_seconds),
         },
     },
 )
