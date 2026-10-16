@@ -13,14 +13,15 @@
 | M0 工程基座 / M1 领域与身份 / M2 受管数据上下文 | **完成，并已真实验证** |
 | M3 生成与制品治理 | **完成**，生成链路已用真实 DeepSeek + 真实 SeaTunnel 2.3.13 端到端跑通 |
 | M4 Harness 安全内核（T-24 ~ T-32） | **完成**（内核与契约测试都在） |
-| M5 三阶段协议与执行 | **进行中**：T-33 ~ T-39 已完成；**T-36 通用副作用框架与执行相关 API（API-05~08、取消、版本审批、调度）也已完成**；**剩 T-40 交付** |
+| M5 三阶段协议与执行 | **完成**：T-33 ~ T-40 全部落地（T-36 通用副作用框架、执行 API、T-40 交付）。**两条尾巴刻意留给 M6**：执行状态的持续对账、Doris 回滚/清理的真实执行（见 §2.1） |
 
 **接手时先确认仓库是好的：**
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-uv run pytest                                   # 期望 738 passed
+uv run pytest                                   # 期望 742 passed
 uv run pytest -m integration                    # 期望 28 passed（需要 Compose 全栈）
+uv run alembic current                          # 期望 20261016_0004 (head)
 docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在跑
 ```
 
@@ -33,13 +34,13 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 
 防止把「没做」当成「做了」。以下是**刻意未满足或只做了一半**的需求。
 
-### 2.1 M5 尚未完成的部分（下一步就要做）
+### 2.1 M5 未满足的部分（刻意留给 M6，**别把它们当成没做完**）
 
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| **T-40 交付与受管文件输出** | **未做** | 执行结果目前只是引擎侧的作业状态；把结果交付成受管文件对象还没做。 |
-| **执行状态的持续对账** | **未做** | `SeaTunnelExecutionEngine.status` 能读引擎状态，但**没有周期性对账任务**：提交之后没人把引擎的推进回写到 `execution_runs`。SPEC T-38 的「状态未知先对账」只做了一半（投影函数与 `None` 语义在，驱动它的扫描不在）。**取消也一样**：`CANCELLING` 之后要有人确认引擎真的停了才进 `CANCELLED`，那个确认者也还没写。 |
+| **执行状态的持续对账** | **未做** | `SeaTunnelExecutionEngine.status` 能读引擎状态，但**没有周期性对账任务**：提交之后没人把引擎的推进回写到 `execution_runs`。SPEC T-38 的「状态未知先对账」只做了一半（投影函数与 `None` 语义在，驱动它的扫描不在）。**取消也一样**：`CANCELLING` 之后要有人确认引擎真的停了才进 `CANCELLED`，那个确认者也还没写。**T-40 的自动交付**同样要挂在它上面（见 §3 第一步）。 |
 | **DORIS_ROLLBACK / DORIS_CLEANUP 的真实执行** | **只做了受管入口** | 准备单/审批/能力/租约齐备，执行器接口 `DorisMaintenancePort` 已定；`create_doris_maintenance()` 会**明确报错**（不静默降级）。真实换名/删表属 M6 的 T-45（SPEC 的划分）。`rollbacks` / `cleanups` 路由因此仍是空壳。 |
+| **T-40 的交付对象** | 只交付**执行报告**，不交付结果数据 | 引擎只回作业状态、不回结果数据（数据直接落在 Doris 里），所以现实的交付物是执行自己产生的聚合事实（状态/指标/失败归类/诊断/监督/质量）。要交付真实结果数据集，得先有一条从 Doris 导出的路径 —— 那属 M6 的 T-42/T-45 区域。**别把「交付报告」说成「交付数据结果」。** |
 
 ### 2.1.1 T-36 落地时的三个定案（**都与 SPEC 字面有出入，是有意为之**）
 
@@ -75,33 +76,34 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 
 ## 3. 下一步该做什么（按顺序）
 
-### 已完成：T-36 通用副作用框架 + 执行相关 API
-
-落点（新会话按这个顺序读一遍就够）：
+### 本轮新增的落点（新会话按这个顺序读一遍就够）
 
 | 文件 | 作用 |
 |---|---|
-| `application/harness/side_effects.py` | 协议本身：`prepare` / `decide` / `commit` / `claim_execution` / `finish_execution` / `verify_grant` / `abandon`，以及能力令牌的登记与原子消费 |
+| `application/harness/side_effects.py` | 副作用协议：`prepare` / `decide` / `commit` / `claim_execution` / `finish_execution` / `verify_grant` / `abandon`，以及能力令牌的登记与原子消费 |
 | `application/harness/side_effect_targets.py` | 九类操作「动什么」的**唯一**推导入口 + 操作到聚合对象的映射 |
 | `application/side_effect_runtime.py` | 执行侧三道闸（`begin_execution`）、执行器接口（`DorisMaintenancePort`）、执行侧三类的执行器 |
 | `side_effect_tasks.py` | 通用副作用 Worker（三段式事务，见文件头） |
-| `application/executions.py` / `api/routes/executions.py` | 执行查询、受管取消、API-05~08 |
+| `application/executions.py` / `api/routes/executions.py` | 执行查询、受管取消、API-05~08、受管交付 |
+| `application/execution_delivery.py` | T-40：把执行结果落成受管文件资产（报告载荷的构造与脱敏） |
 | `api/routes/{approvals,schedules,side_effects}.py` | 版本审批、调度配置、通用副作用查询面 |
-| `tests/test_side_effect_protocol.py` / `tests/test_execution_api.py` | 这两块的验收（21 + 14 条） |
+| `tests/test_side_effect_protocol.py` / `tests/test_execution_api.py` | 这些的验收（21 + 18 条） |
 
-### 第一步：T-40 交付与受管文件输出
+### 第一步：M6 的第一件事，把「状态推进」补上（T-43 的一半）
 
-执行结果交付成受管文件对象，同样受治理。可以复用 `application/file_assets.py` 的落盘
-与校验路径。
+`execution_runs` 现在**没有自动推进**：提交之后就没人把引擎的进行状态写回来，
+`CANCELLING` 也没有人确认引擎真的停了。这一条同时是三个东西的依赖：
 
-**先想清楚「交付什么」**：引擎目前只回作业状态，不回结果数据（数据直接落在 Doris 里）。
-所以 T-40 现实的对象是**执行产物**——质量报告（T-41）、被拒行样本、诊断摘要之类。
-如果要做「把执行结果导出成文件」，那要先有一条从 Doris 导出的路径，而那属于 M6 的
-T-42/T-45 区域。**动手前先确认用户要的是哪一种**，别默认是后者。
+- SPEC T-38 的「状态未知先对账」；
+- 取消语义的诚实收尾（`CANCELLING` → `CANCELLED`）；
+- **T-40 的自动交付**：交付要求执行已跑出结论，而现在没有任何东西会把运行推到终态。
 
-### 第二步：M6（质量、监督与治理，T-41 ~ T-46）
+所以先做一个对账扫描（Beat 周期任务 + `SeaTunnelExecutionEngine.status` 投影回写），
+再在它确认终态后触发交付。**交付服务本身已经是幂等的**，扫描可以放心重跑：
+`deliver_report` 命中已有的交付物会直接返回那一份。
 
-其中 **T-43 运行监督引擎** 与 §2.1 里「执行状态对账」是同一片区域，一起做更省事。
+### 第二步：M6 余下部分（T-41 ~ T-46）
+
 T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups` 路由。
 
 ### 收尾要做的（每轮结束时）
@@ -125,7 +127,7 @@ T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups
 | M2 | 七个探查器 + `probe_registry`、ClickHouse(GAP-01)、S3/MinIO(GAP-02)、REST API(GAP-03)、脱敏、凭据全生命周期 |
 | M3 | `agent/graph.py`（LangGraph）、`application/policy.py`（确定性门禁）、`engine_check.py` + `seatunnel_engine_check.py`、`application/versions.py`（不可变版本）、`application/schedules.py`、生成链路 API + `generation_tasks.py` |
 | M4 | `application/harness/` 九个模块（清单/PDP/分类/签名/重放/Broker/Outbox/账本/失败关闭） |
-| M5（部分） | `application/harness/{preparation,approval,commit,engine,placeholders}.py`、`execution_tasks.py`、`beat_tasks.py`、`infrastructure/seatunnel_execution.py`；**本轮**加了 `application/harness/{side_effects,side_effect_targets}.py`、`application/{side_effect_runtime,executions}.py`、`side_effect_tasks.py`，以及 `api/routes/{executions,approvals,schedules,side_effects}.py` |
+| M5 | `application/harness/{preparation,approval,commit,engine,placeholders}.py`、`execution_tasks.py`、`beat_tasks.py`、`infrastructure/seatunnel_execution.py`；`application/harness/{side_effects,side_effect_targets}.py`、`application/{side_effect_runtime,executions,execution_delivery}.py`、`side_effect_tasks.py`，以及 `api/routes/{executions,approvals,schedules,side_effects}.py` |
 
 ### 4.2 实测结论（**排查出来的，别再重新踩**）
 
@@ -169,8 +171,8 @@ T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups
 | Docker 镜像 | 基础镜像 + E2E 扩展镜像（Doris FE/BE、SeaTunnel）均已加载 |
 | 容器 | 当前 9 个在跑（本项目 8 个 + 一个无关的 `customer-service-mysql`）。起全栈：`docker compose -f infra/compose.yaml --profile e2e up -d --no-build --pull never` |
 | 端口 | postgres `5432`、redis **`16379`**、mysql-e2e `13306`、minio `9000/9001`、Doris FE `8030/9030`、SeaTunnel `8080` |
-| 控制面库 | 迁到 `20261016_0003`（head）。**数据不干净**：有前几轮烟测留下的 **213 个项目**、4 条 `agent_runs`、1 份准备单、1 条执行记录。清库需 `DROP SCHEMA` 级别的操作，**本轮被权限拦截，未执行**。 |
-| 制品目录 | `var/artifacts/` 下有 6 个文件（前几轮冻结的制品，已被 gitignore） |
+| 控制面库 | 迁到 `20261016_0004`（head，本轮新增 `file_assets.execution_run_id`，已在真库上 `alembic upgrade` 验证，降级 SQL 也离线校验过）。**数据不干净**：有前几轮烟测留下的 **213 个项目**、4 条 `agent_runs`、1 份准备单、1 条执行记录。清库需 `DROP SCHEMA` 级别的操作，**被权限拦截过，未执行**。 |
+| 制品目录 | `var/artifacts/` 下有 6 个文件（前几轮冻结的制品，已被 gitignore）；交付物另落在 `DIP_FILE_ASSET_ROOT` 下 |
 | 注册表 | **Docker Hub 不通**，只有 `mcr.microsoft.com` 可达 → ClickHouse/Oracle/Hive/HDFS/Vault 镜像拉不到 |
 | `.env` | 已配好 LLM 接入与一套本地 Ed25519 签名密钥对；`DIP_BOOTSTRAP_ENABLED=false` |
 
@@ -262,6 +264,17 @@ T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups
 28. **要发多次 HTTP 请求的测试，夹具数据必须真提交**。`session` 夹具只 flush 不 commit，
     而每个请求结束时应用层的事务会结束 —— 没提交的事实下一次请求就读不到了。这类模块
     统一用 `session_factory` + 显式 `async with session.begin()`（见 `test_execution_api.py`）。
+29. **交付物要能「按执行反查」并且「重复交付只留一份」**，靠文件名约定两条都做不到：
+    名字可以被改、也可以重名。所以 `file_assets` 加了 `execution_run_id`（可空）
+    与 `(execution_run_id, name)` 唯一约束，交付服务命中已有那份就直接返回。
+    **执行记录被删时 `SET NULL` 而不是 CASCADE** —— 交付物是执行结果的留档，
+    删记录不该让它一起消失。
+30. **脱敏只擦字符串值，不动键名**。整段 JSON 文本丢给 `scrub_secrets` 会被
+    `\b(secret|token|api_key)\b\s*[=:]` 这类关键词正则命中，把 `"api_key": "..."` 改写成
+    `api_key=***` —— 产出一份**不是 JSON 的「JSON」**。交付载荷因此走
+    `execution_delivery.scrub_report` 递归擦值；报告将来长出新的诊断字段也不会漏。
+31. **报告用排序键 + 固定缩进的 JSON**：既人能读，又让同一份事实重复交付得到同一个
+    内容摘要。摘要可复现是审计物该有的性质，紧凑单行虽然也能复现，但没人读得下去。
 
 ---
 
@@ -269,7 +282,7 @@ T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups
 
 | 手段 | 覆盖什么 | 不覆盖什么 |
 |---|---|---|
-| 单元 / 契约测试（738 条） | 状态机、门禁、PDP、分类、签名、重放、Outbox、账本、脱敏、格式推断、SQL 生成、身份与职责分离、九类副作用的受管入口与执行租约 | 任何真实外部系统 |
+| 单元 / 契约测试（742 条） | 状态机、门禁、PDP、分类、签名、重放、Outbox、账本、脱敏、格式推断、SQL 生成、身份与职责分离、九类副作用的受管入口与执行租约、受管交付 | 任何真实外部系统 |
 | `pytest -m integration`（28 条） | 真实 PostgreSQL / MySQL / MinIO / Doris / SeaTunnel 提交与状态；未起服务时**整组跳过** | 需要 Docker Hub 镜像的数据源、真实 Vault、真实 LLM |
 | 服务层端到端烟测 | 业务事实的完整推进（生成、三阶段协议、Outbox → Worker → 引擎） | 同上；**且它绕过 HTTP 层**，接口契约由 API 测试单独覆盖 |
 
@@ -277,6 +290,6 @@ T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups
 
 ```bash
 uv run pytest -m integration                          # 真实引擎的提交与状态投影
-uv run pytest tests/test_tool_broker.py -q            # 「无绕过路径」的证据是执行器调用次数为 0
 uv run pytest tests/test_side_effect_protocol.py -q   # 九类操作各自产生准备单/审批/能力记录
+uv run pytest tests/test_tool_broker.py -q            # 「无绕过路径」的证据是执行器调用次数为 0
 ```

@@ -25,8 +25,13 @@ from data_integration_platform.api.schemas import (
     ExecutionPreparationDecisionRequest,
     ExecutionPreparationResponse,
     ExecutionRunResponse,
+    FileAssetResponse,
     PrepareExecutionRequest,
     SideEffectPreparationResponse,
+)
+from data_integration_platform.application.execution_delivery import (
+    deliver_report,
+    deliveries_of,
 )
 from data_integration_platform.application.executions import (
     get_run,
@@ -188,6 +193,39 @@ async def list_version_execution_runs(
 ) -> list[ExecutionRunResponse]:
     rows = await runs_of_version(session, version_id=version_id, actor_id=actor)
     return [ExecutionRunResponse.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/execution-runs/{run_id}/deliveries",
+    response_model=FileAssetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def deliver_execution_report(
+    run_id: uuid.UUID,
+    actor: ActorId,
+    trace_id: TraceId,
+    session: AsyncSession = Depends(get_session),
+) -> FileAssetResponse:
+    """把一次执行的结果交付成受管文件资产（T-40）。
+
+    **只接受已跑出结论的执行**；重复调用返回同一份交付物，不会再落一份内容相同的文件。
+    """
+    async with session.begin():
+        asset = await deliver_report(session, run_id=run_id, actor_id=actor, trace_id=trace_id)
+    return FileAssetResponse.model_validate(asset)
+
+
+@router.get(
+    "/execution-runs/{run_id}/deliveries",
+    response_model=list[FileAssetResponse],
+)
+async def list_execution_deliveries(
+    run_id: uuid.UUID,
+    actor: ActorId,
+    session: AsyncSession = Depends(get_session),
+) -> list[FileAssetResponse]:
+    rows = await deliveries_of(session, run_id=run_id, actor_id=actor)
+    return [FileAssetResponse.model_validate(row) for row in rows]
 
 
 @router.post(

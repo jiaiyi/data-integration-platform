@@ -325,6 +325,8 @@ class CredentialAlertDeliveryResponse(ResponseModel):
 class FileAssetResponse(ResponseModel):
     id: uuid.UUID
     project_id: uuid.UUID
+    # 非空表示这份文件是某次执行的交付物（T-40）；用户上传的资产留空。
+    execution_run_id: uuid.UUID | None
     name: str
     format: FileAssetFormat
     endpoint_role: DataEndpointRole

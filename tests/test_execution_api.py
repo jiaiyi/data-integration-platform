@@ -16,6 +16,8 @@ Worker 的真实行为由 `tests/test_side_effect_protocol.py` 与 `tests/test_e
 flush-only 语义在这里不够用）。
 """
 
+import hashlib
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -26,10 +28,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from data_integration_platform.api.routes import executions as executions_routes
+from data_integration_platform.application.file_assets import FileAssetService
 from data_integration_platform.application.versions import PipelineVersionService
 from data_integration_platform.domain.enums import (
     ApprovalDecisionValue,
     ExecutionStatus,
+    FailureCategory,
+    FailureStage,
     PipelineVersionStatus,
     ProjectRole,
     ScheduleMisfirePolicy,
@@ -39,6 +44,7 @@ from data_integration_platform.domain.harness import HarnessRole
 from data_integration_platform.infrastructure.models import (
     ExecutionPreparation,
     ExecutionRun,
+    FileAsset,
     HarnessCommandOutbox,
     PipelineVersion,
     ProjectMembership,
@@ -597,3 +603,136 @@ async def test_execution_preparation_detail_is_project_scoped(
         f"/api/v1/execution-preparations/{preparation['id']}", headers=headers(outsider)
     )
     assert denied.status_code == 403
+
+
+# ------------------------------------------------------ 受管交付（T-40）
+async def finish_run(
+    factory: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    *,
+    status: ExecutionStatus = ExecutionStatus.SUCCEEDED,
+) -> None:
+    """把运行推进到终态。
+
+    真实的那一步由状态对账完成（M6 的 T-43 交付它）；交付这一类用例只关心
+    「跑出结论之后怎么交付」，用不着先把对账实现出来。
+    """
+    async with factory() as session:
+        async with session.begin():
+            run = await session.get(ExecutionRun, run_id)
+            assert run is not None
+            run.status = status
+            run.engine_status = "FINISHED"
+            run.source_rows = 120
+            run.sink_rows = 118
+            run.failure_category = FailureCategory.SINK_WRITE
+            run.failure_stage = FailureStage.SINK
+            run.retryable = False
+            run.diagnosis = {"reason": f"连接串 mysql://reader:{'SECRET'}=@db/source 不可用"}
+            await session.flush()
+
+
+async def test_delivery_writes_a_managed_report_and_is_idempotent(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    project: ProjectContext,
+    tmp_path: Path,
+) -> None:
+    """交付物是受管文件资产：挂在执行上、可校验摘要、重复交付只留一份。"""
+    run, _ = await committed_run(client, session_factory, project, tmp_path)
+    await finish_run(session_factory, uuid.UUID(run["id"]))
+
+    first = await client.post(
+        f"/api/v1/execution-runs/{run['id']}/deliveries", headers=headers(project.engineer_id)
+    )
+    assert first.status_code == 201, first.text
+    asset = first.json()
+    assert asset["execution_run_id"] == run["id"]
+    assert asset["format"] == "JSON"
+    # 交付物是这条链路的产出，不是输入。
+    assert asset["endpoint_role"] == "SINK"
+
+    again = await client.post(
+        f"/api/v1/execution-runs/{run['id']}/deliveries", headers=headers(project.engineer_id)
+    )
+    assert again.status_code == 201
+    assert again.json()["id"] == asset["id"], "重复交付不该再落一份内容相同的文件"
+
+    listed = await client.get(
+        f"/api/v1/execution-runs/{run['id']}/deliveries", headers=headers(project.engineer_id)
+    )
+    assert [item["id"] for item in listed.json()] == [asset["id"]]
+
+    # 摘要是内容摘要：读回来重算一遍必须一致（文件被改过就能发现）。
+    root = FileAssetService().root()
+    async with session_factory() as session:
+        row = await session.get(FileAsset, uuid.UUID(asset["id"]))
+        assert row is not None
+    raw = (root / row.storage_ref).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == asset["checksum_sha256"]
+
+
+async def test_report_keeps_missing_metrics_and_drops_credentials(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    project: ProjectContext,
+    tmp_path: Path,
+) -> None:
+    """报告里「没量到」是 null、不是 0；诊断文本里的凭据被擦掉。"""
+    run, _ = await committed_run(client, session_factory, project, tmp_path)
+    await finish_run(session_factory, uuid.UUID(run["id"]))
+
+    delivered = await client.post(
+        f"/api/v1/execution-runs/{run['id']}/deliveries", headers=headers(project.engineer_id)
+    )
+    assert delivered.status_code == 201, delivered.text
+    asset_id = delivered.json()["id"]
+
+    async with session_factory() as session:
+        row = await session.get(FileAsset, uuid.UUID(asset_id))
+        assert row is not None
+    payload = json.loads((FileAssetService().root() / row.storage_ref).read_text("utf-8"))
+
+    assert payload["schema_version"] == 1
+    assert payload["execution"]["status"] == ExecutionStatus.SUCCEEDED.value
+    assert payload["metrics"]["source_rows"] == 120
+    # 没量到的指标留空，不填 0 冒充已知（FR-61）。
+    assert payload["metrics"]["sink_bytes"] is None
+    assert payload["failure"]["category"] == FailureCategory.SINK_WRITE.value
+    # 质量报告属 M6 的 T-41，还没有就交付 null，不编一份空的出来。
+    assert payload["quality"] is None
+    # 诊断里的连接串凭据被擦掉，但原因可读。
+    assert "SECRET" not in json.dumps(payload)
+    assert "不可用" in payload["failure"]["diagnosis"]["reason"]
+
+
+async def test_delivery_refuses_a_running_execution(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    project: ProjectContext,
+    tmp_path: Path,
+) -> None:
+    """跑着的执行没有结论，交付一份「还没跑完」的报告等于给审计一个会过期的答案。"""
+    run, _ = await committed_run(client, session_factory, project, tmp_path)
+
+    response = await client.post(
+        f"/api/v1/execution-runs/{run['id']}/deliveries", headers=headers(project.engineer_id)
+    )
+    assert response.status_code == 400
+    assert "只有跑出结论" in response.json()["detail"]
+
+
+async def test_delivery_is_not_reachable_across_projects(
+    client: AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    project: ProjectContext,
+    tmp_path: Path,
+) -> None:
+    run, _ = await committed_run(client, session_factory, project, tmp_path)
+    await finish_run(session_factory, uuid.UUID(run["id"]))
+    outsider = await make_outsider(session_factory)
+
+    response = await client.post(
+        f"/api/v1/execution-runs/{run['id']}/deliveries", headers=headers(outsider)
+    )
+    assert response.status_code == 403

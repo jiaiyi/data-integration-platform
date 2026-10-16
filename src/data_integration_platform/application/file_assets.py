@@ -56,11 +56,65 @@ class FileAssetService:
         await require_project_roles(
             session, project_id=project_id, actor_id=actor_id, allowed=WRITABLE, write=True
         )
+        return await self._store(
+            session,
+            project_id=project_id,
+            actor_id=actor_id,
+            name=filename,
+            data=data,
+            endpoint_role=endpoint_role,
+            execution_run_id=None,
+            trace_id=trace_id,
+        )
+
+    async def store_generated(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        name: str,
+        data: bytes,
+        execution_run_id: uuid.UUID | None,
+        actor_id: uuid.UUID | None = None,
+        trace_id: str | None = None,
+    ) -> FileAsset:
+        """平台自己产出的受管交付物（T-40）。
+
+        **不在这里查项目角色**：调用方（交付服务）已经查过，而且交付也允许由平台侧
+        发起（`actor_id` 可以为空，表示系统动作）。但**大小上限、格式与落盘校验一道不少** ——
+        「谁产出的」不改变一份文件该受的约束。
+
+        交付物的 `endpoint_role` 记 SINK：它是这条链路的**产出**，不是输入。
+        """
+        return await self._store(
+            session,
+            project_id=project_id,
+            actor_id=actor_id,
+            name=name,
+            data=data,
+            endpoint_role=DataEndpointRole.SINK,
+            execution_run_id=execution_run_id,
+            trace_id=trace_id,
+        )
+
+    async def _store(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        actor_id: uuid.UUID | None,
+        name: str,
+        data: bytes,
+        endpoint_role: DataEndpointRole,
+        execution_run_id: uuid.UUID | None,
+        trace_id: str | None,
+    ) -> FileAsset:
+        """上传与交付共用的落盘路径：大小 → 格式 → 行数 → 落盘 → 记录 → 审计。"""
         settings = get_settings()
-        display_name = _safe_display_name(filename)
+        display_name = _safe_display_name(name)
 
         if not data:
-            raise DomainError("上传内容为空")
+            raise DomainError("文件内容为空")
         if len(data) > settings.file_asset_max_bytes:
             raise DomainError(
                 f"文件超过上限 {settings.file_asset_max_bytes} 字节（实际 {len(data)} 字节）"
@@ -80,6 +134,7 @@ class FileAssetService:
 
         asset = FileAsset(
             project_id=project_id,
+            execution_run_id=execution_run_id,
             name=display_name,
             format=file_format,
             endpoint_role=endpoint_role,
@@ -105,6 +160,7 @@ class FileAssetService:
                 "size_bytes": len(data),
                 "row_count": inspection.row_count,
                 "checksum_sha256": asset.checksum_sha256,
+                "execution_run_id": str(execution_run_id) if execution_run_id else None,
             },
             trace_id=trace_id,
         )

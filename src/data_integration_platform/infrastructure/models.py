@@ -259,13 +259,22 @@ class DataProfile(Base, TimestampMixin):
 
 
 class FileAsset(Base, TimestampMixin):
-    """受管文件资产；单文件大小与行数上限见 config.file_asset_*。"""
+    """受管文件资产；单文件大小与行数上限见 config.file_asset_*。
+
+    `execution_run_id` 非空表示这份资产是**某次执行的交付物**（T-40）。
+    用户上传的资产留空。加这一列而不是靠文件名约定：交付要能
+    「按执行查」并且**重复交付只能是同一份**，靠名字猜既查不准也拦不住重复。
+    """
 
     __tablename__ = "file_assets"
+    __table_args__ = (UniqueConstraint("execution_run_id", "name", name="uq_file_assets_run_name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    execution_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("execution_runs.id", ondelete="SET NULL")
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     format: Mapped[FileAssetFormat] = mapped_column(enum_column(FileAssetFormat), nullable=False)
