@@ -8,15 +8,15 @@
 
 ## 1. 一句话现状
 
-M0 / M1 / M2 **已完成并真实验证**；M3 只剩尾巴（T-18 ~ T-22 已完成，
-其中 T-21 引擎检查已对真实 SeaTunnel 2.3.13 跑通），
-剩 T-23 调度，以及生成链路的 API 与 Worker 接线。
+M0 / M1 / M2 **已完成并真实验证**；M3 的任务（T-18 ~ T-23）**全部完成**
+（其中 T-21 引擎检查已对真实 SeaTunnel 2.3.13 跑通），
+只差把生成链路的 API 与 Worker 接起来 —— 见 §3 第四步。
 
 接手时先确认仓库是好的：
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-uv run pytest                    # 期望 416 passed
+uv run pytest                    # 期望 440 passed
 docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在跑
 ```
 
@@ -89,10 +89,24 @@ Port + Adapter，没有做注册表** —— 执行引擎只有 SeaTunnel 一家
   `pipeline_artifacts(version_id, artifact_type)` 的唯一约束。文件系统只负责存字节。
 - 制品路径 `<artifact_root>/<project_id>/<version_id>/<TYPE>.<ext>`。
 
-### 第三步：T-23 调度策略
+### 第三步：T-23 调度策略 —— 已完成
 
-cron + 时区 + 模式（BATCH / WATERMARK_INCREMENTAL）+ 失火策略；冻结触发时刻与水位窗口。
-`pipeline_schedules` 表已存在，配置项 `seatunnel_timezone` 已就位。
+`application/schedules.py`：纯计算部分（`ScheduleSpec` / `plan_tick` / `next_after` /
+`previous_before` / `initial_window`）与持久化（`PipelineScheduleService.configure` /
+`set_enabled` / `advance`）分开，判定可以脱离数据库被穷举测试。
+
+**踩过的坑：croniter 默认把秒放在最后。** PRD 写的是 `0 0 2 * * *`（秒在前），
+不显式 `second_at_beginning=True` 的话它会被读成「每月 2 日 0 点」——任务照跑、时间全错、
+不报任何错。`croniter.is_valid()` **也要**显式传这个参数，否则 `0 30 3 * * *` 会被判非法。
+
+**水位窗口的不变量**：窗口永远是「即将发生的那次触发」要读的 `[起点, 触发时刻)`，
+起点 = 上一次触发时刻，所以 `watermark_window_end == next_run_at` 恒成立。
+`SKIP` 跳过的区间**不推进起点**，会并进下一次触发的窗口，不会凭空消失。
+
+**失火只补一次**：`FIRE_ONCE` 不是「错过几个补几次」（停机一周逐条重放会把上游打垮），
+补跑的水位窗口覆盖整个错过的区间，水位增量模式下因此不丢数据。
+配置调度要求版本**已冻结**（`artifact_sha256` 非空）；「已批准才能启用」这条属 FR-65，
+留给 M5 的扫描与执行阶段，别在这一层假装已经做到。
 
 ### 第四步：把生成链路接起来
 

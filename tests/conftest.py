@@ -20,7 +20,9 @@ os.environ.setdefault(
     "DIP_FILE_ASSET_ROOT", str(Path(tempfile.mkdtemp(prefix="dip-test-assets-")) / "root")
 )
 
+import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -29,7 +31,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from data_integration_platform.config import Settings, get_settings
+from data_integration_platform.domain.enums import ProjectRole
 from data_integration_platform.infrastructure.database import Base, get_session
+from data_integration_platform.infrastructure.models import (
+    Project,
+    ProjectMembership,
+    User,
+)
 from data_integration_platform.main import app
 
 TEST_BOOTSTRAP_TOKEN = "b" * 40
@@ -85,3 +93,30 @@ async def client(
     async with AsyncClient(transport=transport, base_url="http://control-plane") as instance:
         yield instance
     app.dependency_overrides.clear()
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectContext:
+    """一个项目 + 一名数据工程师（可写角色）的标识。
+
+    管道版本与调度都要「项目 + 可写主体」才能落库，两个测试模块共用这一份，
+    免得各自搭一套略有差别的项目夹具。
+    """
+
+    project_id: uuid.UUID
+    engineer_id: uuid.UUID
+
+
+@pytest.fixture
+async def project(session: AsyncSession) -> ProjectContext:
+    created = Project(name=f"项目-{uuid.uuid4().hex[:8]}")
+    engineer = User(subject=f"engineer-{uuid.uuid4().hex[:8]}", display_name="李四")
+    session.add_all([created, engineer])
+    await session.flush()
+    session.add(
+        ProjectMembership(
+            project_id=created.id, user_id=engineer.id, role=ProjectRole.DATA_ENGINEER
+        )
+    )
+    await session.flush()
+    return ProjectContext(project_id=created.id, engineer_id=engineer.id)

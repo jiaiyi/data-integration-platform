@@ -9,7 +9,6 @@
 import hashlib
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +32,10 @@ from data_integration_platform.domain.errors import (
 from data_integration_platform.domain.harness import canonical_json
 from data_integration_platform.infrastructure.models import (
     PipelineVersion,
-    Project,
     ProjectMembership,
     User,
 )
+from tests.conftest import ProjectContext
 
 QUALITY_CODE = "E_POSITIVE"
 
@@ -76,32 +75,9 @@ def candidate(*, hocon: str = HOCON, table: str = "orders_wide") -> GeneratedCan
     return GeneratedCandidate.model_validate({"plan": plan, "hocon": hocon})
 
 
-@dataclass(frozen=True, slots=True)
-class ProjectContext:
-    """一个项目 + 一名数据工程师（可写角色）的标识。"""
-
-    project_id: uuid.UUID
-    engineer_id: uuid.UUID
-
-
 @pytest.fixture
 def service(tmp_path: Path) -> PipelineVersionService:
     return PipelineVersionService(root=tmp_path / "artifacts")
-
-
-@pytest.fixture
-async def project(session: AsyncSession) -> ProjectContext:
-    created = Project(name=f"项目-{uuid.uuid4().hex[:8]}")
-    engineer = User(subject=f"engineer-{uuid.uuid4().hex[:8]}", display_name="李四")
-    session.add_all([created, engineer])
-    await session.flush()
-    session.add(
-        ProjectMembership(
-            project_id=created.id, user_id=engineer.id, role=ProjectRole.DATA_ENGINEER
-        )
-    )
-    await session.flush()
-    return ProjectContext(project_id=created.id, engineer_id=engineer.id)
 
 
 async def make_version(

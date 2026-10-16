@@ -338,6 +338,18 @@ wheels = [
 ]
 
 [[package]]
+name = "croniter"
+version = "6.2.4"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/37/57/2e2a65aee2a70483cb28e2b7e15a072d00a523207593b44400d4717bb100/croniter-6.2.4.tar.gz", hash = "sha256:fc124f751b1b04805c2a04b061898b436b45ab2320b045e1e052ea895de65189", size = 166267, upload-time = "2026-07-10T09:52:59.955Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/cd/ba/d678e5bd329646ca51d3c92addbc77804e86d21f4b6b6a027218e6abb010/croniter-6.2.4-py3-none-any.whl", hash = "sha256:8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d", size = 46677, upload-time = "2026-07-10T09:52:58.425Z" },
+]
+
+[[package]]
 name = "cryptography"
 version = "50.0.2"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -396,6 +408,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "celery", extra = ["redis"] },
     { name = "clickhouse-connect" },
+    { name = "croniter" },
     { name = "cryptography" },
     { name = "defusedxml" },
     { name = "fastapi" },
@@ -440,6 +453,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-croniter" },
     { name = "types-defusedxml" },
 ]
 
@@ -449,6 +463,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30,<1" },
     { name = "celery", extras = ["redis"], specifier = ">=5.5,<6" },
     { name = "clickhouse-connect", specifier = ">=0.8,<1" },
+    { name = "croniter", specifier = ">=6,<7" },
     { name = "cryptography", specifier = ">=45,<52" },
     { name = "defusedxml", specifier = ">=0.7,<1" },
     { name = "fastapi", specifier = ">=0.116,<1" },
@@ -493,6 +508,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.1,<2" },
     { name = "pytest-cov", specifier = ">=6.2,<7" },
     { name = "ruff", specifier = ">=0.12,<1" },
+    { name = "types-croniter", specifier = ">=6.2.4.20261006" },
     { name = "types-defusedxml", specifier = ">=0.7,<1" },
 ]
 
@@ -1830,6 +1846,15 @@ source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ee/9f/c5201d42a484c061e528825fc8e2d565f5abd50a4ced6fb7d29c4ec99b2b/truststore-0.10.5.tar.gz", hash = "sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd", size = 28091, upload-time = "2026-10-12T22:27:31.808Z" }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl", hash = "sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c", size = 19017, upload-time = "2026-10-12T22:27:30.377Z" },
+]
+
+[[package]]
+name = "types-croniter"
+version = "6.2.4.20261006"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/7c/3d/ce852f015fd6ae2babd67b8e5a7c8dedb52f1cd717b6cac6da3483e82f89/types_croniter-6.2.4.20261006.tar.gz", hash = "sha256:7c2bccf800beed6f52ec89f5f8f23b2c0b0cd9c941f059c2a7405de0e62fb54b", size = 12368, upload-time = "2026-10-06T08:15:24.32Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e6/d0/98d0e4fb118717b308ddfad8ca18ba1cc2419439a224dc49a89a46067eea/types_croniter-6.2.4.20261006-py3-none-any.whl", hash = "sha256:1aff83e76866cd01abbe3bb3b18b27f038d65a097b5995bdcc11a658d972cfa0", size = 9787, upload-time = "2026-10-06T08:15:23.47Z" },
 ]
 
 [[package]]

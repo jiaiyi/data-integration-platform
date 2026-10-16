@@ -58,6 +58,9 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.41,<3",
     "structlog>=25,<26",
     "uvicorn[standard]>=0.35,<1",
+    # 调度表达式（T-23）；SPEC §2.2 指定用 croniter。表达式按 6 段（秒在前）解析，
+    # 与 PRD 里 `0 0 2 * * *` 的写法一致，所以调用处要显式 second_at_beginning=True。
+    "croniter>=6,<7",
 ]
 
 [dependency-groups]
@@ -68,6 +71,7 @@ dev = [
     "pytest-asyncio>=1.1,<2",
     "pytest-cov>=6.2,<7",
     "ruff>=0.12,<1",
+    "types-croniter>=6.2.4.20261006",
     "types-defusedxml>=0.7,<1",
 ]
 

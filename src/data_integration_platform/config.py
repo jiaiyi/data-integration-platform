@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # ---- 制品存储（T-22）----
     artifact_root: Path = Path("var/artifacts")
 
+    # ---- 调度（T-23）----
+    # 失火宽限：触发时刻过去超过这个秒数才算失火，按策略处理。默认值取参考实现口径
+    # （PRD §5.3 决策 Q5：这类秒数属可调实现参数，验收只看「失火按策略处理」这个行为）。
+    schedule_misfire_grace_seconds: int = Field(default=120, ge=1, le=86_400)
+
     # ---- 可观测 ----
     otel_enabled: bool = False
     otel_service_name: str = Field(
