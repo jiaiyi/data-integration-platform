@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from data_integration_platform.application.masking import mask_rows
+from data_integration_platform.application.secret_governance import as_utc
 from data_integration_platform.application.secrets import ConnectionCredentials
 from data_integration_platform.config import Settings, get_settings
 from data_integration_platform.domain.enums import (
@@ -156,7 +157,9 @@ def require_profile_usable(profile: DataProfile, *, now: datetime | None = None)
         raise DomainError(f"Profile 不可用：当前状态 {profile.status.value}")
     if profile.expires_at is None:
         raise DomainError("Profile 缺少有效期，按不可用处理")
-    if profile.expires_at <= moment:
+    # 时间口径先归一化：SQLite 这类后端读回的 `DateTime(timezone=True)` 不带 tzinfo，
+    # 直接与 aware 的 now 比较会抛 TypeError（见 HANDOVER §5 的 as_utc 约定）。
+    if as_utc(profile.expires_at) <= moment:
         raise DomainError("Profile 已过期，请重新发起元数据探查")
 
 

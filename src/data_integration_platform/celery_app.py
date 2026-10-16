@@ -23,6 +23,7 @@ celery_app = Celery(
     backend=settings.redis_url,
     include=[
         "data_integration_platform.connection_tasks",
+        "data_integration_platform.generation_tasks",
         "data_integration_platform.secret_migration_tasks",
         "data_integration_platform.secret_rotation_tasks",
         "data_integration_platform.secret_rotation_rollback_tasks",

@@ -19,6 +19,10 @@ os.environ.setdefault("DIP_SECRET_MASTER_KEY", Fernet.generate_key().decode())
 os.environ.setdefault(
     "DIP_FILE_ASSET_ROOT", str(Path(tempfile.mkdtemp(prefix="dip-test-assets-")) / "root")
 )
+# 冻结制品同理：不设这个变量时默认值是仓库内的 `var/artifacts`，跑一次测试就往仓库里写文件。
+os.environ.setdefault(
+    "DIP_ARTIFACT_ROOT", str(Path(tempfile.mkdtemp(prefix="dip-test-artifacts-")) / "root")
+)
 
 import uuid
 from collections.abc import AsyncIterator

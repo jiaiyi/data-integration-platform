@@ -128,6 +128,7 @@ packages = ["data_integration_platform"]
 module = [
     "data_integration_platform.connection_tasks",
     "data_integration_platform.credential_alert_tasks",
+    "data_integration_platform.generation_tasks",
     "data_integration_platform.secret_destruction_tasks",
     "data_integration_platform.secret_migration_tasks",
     "data_integration_platform.secret_rotation_rollback_tasks",
