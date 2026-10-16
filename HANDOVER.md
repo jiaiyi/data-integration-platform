@@ -2,20 +2,21 @@
 
 > 用途：跨会话延续本项目开发。**先读本文件，再读 `README.md`（进度表 + 本机联调坑）
 > 与 `specs/SPEC.md §10`（任务分解）。**
-> 最后更新：2026-10-16，对应提交 `553450c`。
+> 最后更新：2026-10-16，对应提交 `4504fb0`。
 
 ---
 
 ## 1. 一句话现状
 
-M0 / M1 / M2 **已完成并真实验证**；M3 做到一半（T-18 生成契约 + T-20 确定性门禁 + T-19 状态机已完成，
-剩 T-21 真实引擎检查、T-22 不可变版本、T-23 调度，以及生成链路的 API 与 Worker 接线）。
+M0 / M1 / M2 **已完成并真实验证**；M3 做到一大半（T-18 生成契约 + T-19 状态机 + T-20 确定性门禁 +
+T-21 真实引擎检查已完成，且引擎检查已对真实 SeaTunnel 2.3.13 跑通），
+剩 T-22 不可变版本、T-23 调度，以及生成链路的 API 与 Worker 接线。
 
 接手时先确认仓库是好的：
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-uv run pytest                    # 期望 391 passed
+uv run pytest                    # 期望 407 passed
 docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在跑
 ```
 
@@ -31,7 +32,7 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | **FR-57 / FR-23**「所有副作用走同一受管入口」 | **只做了一半** | 凭据四类操作已有「申请→具名审批→执行」的数据结构与状态机，审批人还必须持 `SECURITY_APPROVER` 槽位。但把它们接到 Harness 的 **Capability / 事务 Outbox** 上属 M5 的 T-36。**在此之前不得声称 FR-57 已满足。** |
-| **FR-35 / T-21** 真实引擎检查 | **未做** | 状态机的 `policy` 节点已按「引擎检查在人工审批中断之前」的顺序留好位置，`GateKind.ENGINE_CHECK` 与 `with_engine_check()` 也已就位（由引擎检查器追加到门禁报告），但引擎检查器本身还没写。 |
+| **FR-35 / T-21** 真实引擎检查 | **已做，但能力边界要说清** | 见 §3 第一步。**不要声称等价于 SPEC 写的「引擎 `--check`」** —— 那个机制在 2.3.13 上不存在。本层做的是「引擎可用性 + 引擎自己的配置解析器判文档结构」，**不校验连接器选项**（那一层只在提交时的作业解析里发生）。 |
 | **FR-28**「生成后端可切换」 | **切换点存在，第二后端未接入** | `create_generation_adapter` 遇到 `seatunnel-cli` 会**明确报错**，不静默降级。这是刻意的（与探查器注册表同款姿态）。 |
 | **FR-33** 逐行 LLM Transform | **只做门禁侧** | 默认严格关闭、开启需独立密钥与出口白名单，这两条已落配置与门禁；能力本身未实现（按决策 Q7「按参考实现交付」，等 M3 后半段评估）。 |
 | **T-15 的 Vault 真实验证** | **用假服务代替** | 本机拉不到 `hashicorp/vault` 镜像，集成测试用一个实现 KV v2 语义的本地 HTTP 服务代替（`tests/integration/test_secret_lifecycle_live.py`）。**Vault 客户端代码已被真实请求路径验证，但没对真实 Vault 验证过。** |
@@ -49,20 +50,28 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 
 ## 3. 下一步该做什么（按顺序）
 
-### 第一步：T-21 真实引擎检查
+### 第一步：T-21 真实引擎检查 —— 已完成（`fb633fa` 之后）
 
-**先探明 SeaTunnel 2.3.13 的 REST 端点。** 实测 `/hazelcast/rest/*` 在这个版本返回 **404**
-（旧文档里的路径不适用），别照搬。可靠做法是进容器看它的 REST 配置或 jar 里的路由：
+探明后的**实测结论**（这些是排查出来的，别再重新踩）：
 
-```bash
-docker exec data-integration-platform-seatunnel-master-1 ls /opt/seatunnel/config
-docker logs data-integration-platform-seatunnel-master-1 2>&1 | grep -i "rest\|port"
-```
+- REST 端点挂在**根**下，不是 `/hazelcast/rest/maps/*`：`/overview`、`/running-jobs`、
+  `/finished-jobs`、`/pending-jobs`、`/job-info`、`/submit-job`、`/encrypt-config` 等。
+- CLI 的 `--check` **对作业配置是空操作**（语法损坏、插件不存在的配置都返回 0）——
+  它校验的是**集群配置**。所以 SPEC §10 写的「引擎 `--check`」在 2.3.13 上不成立。
+- REST **没有 dry-run**：`/submit-job` 接受 HOCON 文本但会真的起作业，不能用在冻结之前。
+- `/encrypt-config` 用引擎自己的配置解析器解析，**无副作用**，但只吃 **JSON 配置文档**
+  （HOCON 文本一律回 `Invalid JSON format in request body.`），且 `source`/`transform`/`sink`
+  必须是**插件对象数组**（传对象报 `LinkedHashMap cannot be cast to ArrayList`）。
 
-然后按 `MetadataProbePort` 同款模式实现：一个 Port + 一个 Adapter + 一个注册表条目，
-返回 `GateFinding(kind=GateKind.ENGINE_CHECK, ...)`，由调用方用 `with_engine_check()` 追加到报告。
+落地形态：`application/engine_check.py`（`EngineCheckPort` + `gate_runner_with_engine` /
+`build_gate_runner`）+ `infrastructure/seatunnel_engine_check.py`（`SeaTunnelEngineCheck`）。
+候选 HOCON 经 `pyhocon` 转成引擎要的 JSON 文档再送检。**按 `MetadataProbePort` 的模式只做了
+Port + Adapter，没有做注册表** —— 执行引擎只有 SeaTunnel 一家，没有切换需求，注册表是空抽象。
 
-**引擎不可用时必须阻止冻结并明确报错**（FR-35：不允许跳过引擎检查直接冻结）。
+**边界（不许含糊）**：这一层判的是配置**文档结构**（缺 source/sink、source 为空这类，
+由引擎自己报「Miss &lt;Source&gt; config!」），**不校验连接器选项**；选项级校验只发生在
+提交时的作业解析阶段。确定性门禁不过时**不再外呼引擎**（候选已被拒，省一次外部调用，
+也免得修复提示被引擎结论挤掉）。
 
 ### 第二步：T-22 不可变版本与 Artifact
 

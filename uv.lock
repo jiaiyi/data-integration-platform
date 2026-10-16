@@ -417,6 +417,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic-settings" },
     { name = "pyhive" },
+    { name = "pyhocon" },
     { name = "pymysql" },
     { name = "pyorc" },
     { name = "pypdf" },
@@ -469,6 +470,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=17,<24" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
     { name = "pyhive", specifier = ">=0.7,<1" },
+    { name = "pyhocon", specifier = ">=0.3,<1" },
     { name = "pymysql", specifier = ">=1.1,<2" },
     { name = "pyorc", specifier = ">=0.9,<1" },
     { name = "pypdf", specifier = ">=5,<7" },
@@ -1492,6 +1494,15 @@ dependencies = [
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f6/ec/5c658b3a4d99a6d9145030cc8e003c3f7efc668d866e88544812ab0af310/PyHive-0.7.0.tar.gz", hash = "sha256:585beff9578a61b99aed47140fec97e26323e8c685a5b5d0c8550a8ebf8a24e0" }
 
 [[package]]
+name = "pyhocon"
+version = "0.3.63"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "pyparsing" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/25/d9/810f7d07989dbe565712869094d2d595bed2af7474e02bb210563cee17c1/pyhocon-0.3.63.tar.gz", hash = "sha256:7c98db21453c0390c6cedc376576fee4e0a153da5f2201bc681cf886820f4a7c", size = 307265, upload-time = "2026-03-20T03:23:45.957Z" }
+
+[[package]]
 name = "pymysql"
 version = "1.2.3"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1516,6 +1527,15 @@ wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/fb/c6/75d5ceb1212f45171b9e1929fcf7c25b257865421c9cab672ca995c668b2/pyorc-0.11.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:c6cc8e5140ddc40949085bdbff101432651d839047799c0709c8a40993e82461", size = 3976933, upload-time = "2026-04-11T16:27:43.773Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e3/e4/566211d62c8901aa63533549fde42650bdec59a718cb9fdb326ef7af1897/pyorc-0.11.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:a15d0c1b3c9397a37d8f61702f7e76d72a291a732ddc54bbcdb54bfcc9cf29e0", size = 4126426, upload-time = "2026-04-11T16:27:46.354Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d7/0d/bc810e210e4cd2c6a9e1606a705dbfae30c5dca07c7b3a21031a1d84f31c/pyorc-0.11.0-cp312-cp312-win_amd64.whl", hash = "sha256:e57113be36eacdbaa2cafe5c8b240025f9c144dd48f19ba345810c74febe07a4", size = 1006768, upload-time = "2026-04-11T16:27:48.582Z" },
+]
+
+[[package]]
+name = "pyparsing"
+version = "3.3.3"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
 ]
 
 [[package]]

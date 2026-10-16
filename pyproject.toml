@@ -49,6 +49,9 @@ dependencies = [
     # langgraph-checkpoint-postgres 走 psycopg（v3），binary 额外项自带 libpq；
     # 控制面业务真相仍用 asyncpg，两者互不影响。
     "psycopg[binary]>=3.2,<4",
+    # 真实引擎检查（T-21）：引擎的 REST 接口只收 JSON 配置文档，候选是 HOCON 文本，
+    # 转换交给 HOCON 解析器而不是自写的受限读取器 —— 后者「解析成功但内容错了」会让门禁假通过。
+    "pyhocon>=0.3,<1",
     # 文件资产上传走 multipart/form-data（T-16）
     "python-multipart>=0.0.20,<1",
     "redis>=5,<7",
@@ -139,6 +142,7 @@ module = [
     "pyarrow.*",
     "pyhive.*",
     "pymysql.*",
+    "pyhocon.*",
     "pyorc.*",
     "pypdf.*",
     "puresasl.*",
