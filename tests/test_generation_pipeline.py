@@ -105,7 +105,7 @@ def question_json(text: str = "增量水位列未指定，请指定") -> str:
     return json.dumps({"question": text}, ensure_ascii=False)
 
 
-async def _connection(
+async def make_connection(
     session: AsyncSession,
     *,
     project: ProjectContext,
@@ -126,7 +126,7 @@ async def _connection(
     return connection
 
 
-async def _profile(
+async def make_profile(
     session: AsyncSession,
     *,
     connection: DataConnection,
@@ -178,28 +178,28 @@ class PipelineFixture:
 @pytest.fixture
 async def pipeline(session: AsyncSession, project: ProjectContext) -> PipelineFixture:
     """一个已冻结之前、可供生成的版本：两张表 + 各自的连接与 Profile。"""
-    source_connection = await _connection(
+    source_connection = await make_connection(
         session,
         project=project,
         name=f"mysql-{uuid.uuid4().hex[:6]}",
         connector=ConnectorType.MYSQL,
         role=DataEndpointRole.SOURCE,
     )
-    sink_connection = await _connection(
+    sink_connection = await make_connection(
         session,
         project=project,
         name=f"doris-{uuid.uuid4().hex[:6]}",
         connector=ConnectorType.DORIS,
         role=DataEndpointRole.SINK,
     )
-    source = await _profile(
+    source = await make_profile(
         session,
         connection=source_connection,
         role=DataEndpointRole.SOURCE,
         table_name="orders",
         columns=SOURCE_COLUMNS,
     )
-    sink = await _profile(
+    sink = await make_profile(
         session,
         connection=sink_connection,
         role=DataEndpointRole.SINK,
@@ -277,14 +277,14 @@ async def test_start_rejects_profiles_from_another_project(
     other = Project(name=f"别的项目-{uuid.uuid4().hex[:6]}")
     session.add(other)
     await session.flush()
-    connection = await _connection(
+    connection = await make_connection(
         session,
         project=ProjectContext(project_id=other.id, engineer_id=uuid.uuid4()),
         name=f"foreign-{uuid.uuid4().hex[:6]}",
         connector=ConnectorType.MYSQL,
         role=DataEndpointRole.SOURCE,
     )
-    foreign = await _profile(
+    foreign = await make_profile(
         session,
         connection=connection,
         role=DataEndpointRole.SOURCE,
@@ -308,7 +308,7 @@ async def test_start_rejects_a_stale_profile(
     session: AsyncSession, pipeline: PipelineFixture
 ) -> None:
     """Profile 是**有时效的事实**，过期不能降级使用（FR-13）。"""
-    stale = await _profile(
+    stale = await make_profile(
         session,
         connection=await session.get(DataConnection, pipeline.sink.connection_id),
         role=DataEndpointRole.SINK,
@@ -468,6 +468,40 @@ async def test_worker_fails_when_the_model_is_unreachable(
     assert settlement.retryable is True
     assert run.error == "生成能力未就绪：未配置 LLM 接入信息"
     assert pipeline.version.status is PipelineVersionStatus.PROFILING
+
+
+async def test_worker_settles_on_an_unexpected_exception(
+    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    pipeline: PipelineFixture,
+) -> None:
+    """**回归**：驱动层漏网的异常曾经直接抛出，任务事务回滚，运行永久停在 RUNNING。
+
+    与探查那边同一条要求：失败也要先落成事实。这里用一个非 `DomainError` 的异常验。
+    """
+
+    class ExplodingAdapter:
+        backend_name = "exploding"
+
+        async def generate(self, request: Any) -> str:
+            raise RuntimeError("checkpointer 的实现细节炸了")
+
+    run = await start(session, pipeline)
+    await session.commit()
+
+    settlement = await run_worker(
+        session_factory,
+        run,
+        adapter=ExplodingAdapter(),
+        engine=FakeEngine(),
+        checkpointer=InMemorySaver(),
+    )
+
+    await session.refresh(run)
+    assert settlement.status is AgentRunStatus.FAILED
+    assert run.status is AgentRunStatus.FAILED
+    assert "RuntimeError" in (run.error or "")
+    assert run.finished_at is not None
 
 
 async def test_worker_skips_a_run_that_is_already_finished(

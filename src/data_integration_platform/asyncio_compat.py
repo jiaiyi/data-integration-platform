@@ -24,8 +24,13 @@ def _worker_loop() -> asyncio.AbstractEventLoop:
     global _loop
     if _loop is None or _loop.is_closed():
         if sys.platform == "win32":
-            # asyncpg 依赖 Proactor 提供的 socket 实现。
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            # Windows 上必须用 Selector 而不是默认的 Proactor：两者只能取交集。
+            # - asyncpg（业务库）**两种都能跑**（实测 Selector 上连查正常）；
+            # - psycopg（LangGraph 的 Checkpoint 库）**明确拒绝 Proactor**，
+            #   抛 `Psycopg cannot use the 'ProactorEventLoop' to run in async mode`。
+            # 所以 Selector 是唯一能让业务库与 Checkpoint 库共存的实现。
+            # 代价：Windows 的 Selector 循环不支持子进程与管道 reader，本项目不用这两样。
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         _loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_loop)
     return _loop

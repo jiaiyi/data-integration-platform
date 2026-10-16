@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from data_integration_platform.domain.enums import (
+    AgentRunStatus,
     ConnectionStatus,
     ConnectorType,
     CredentialAlertDeliveryStatus,
@@ -18,6 +19,7 @@ from data_integration_platform.domain.enums import (
     DataEndpointRole,
     DataProfileStatus,
     FileAssetFormat,
+    PipelineVersionStatus,
     ProjectRole,
     ProjectStatus,
     SecretDestructionStatus,
@@ -307,3 +309,79 @@ class FileAssetResponse(ResponseModel):
     row_count: int | None
     checksum_sha256: str
     created_at: datetime
+
+
+# ------------------------------------------------------------------ 管道版本（T-22）
+class CreatePipelineRequest(BaseModel):
+    project_id: uuid.UUID
+    name: str = Field(min_length=1, max_length=255)
+    requirement: str = Field(min_length=1, max_length=20_000)
+
+
+class RevisePipelineVersionRequest(BaseModel):
+    """需求变更：只带新需求，平台据此创建 V+1（FR-39）。"""
+
+    requirement: str = Field(min_length=1, max_length=20_000)
+
+
+class PipelineVersionResponse(ResponseModel):
+    id: uuid.UUID
+    pipeline_id: uuid.UUID
+    version_number: int
+    status: PipelineVersionStatus
+    requirement: str
+    parent_version_id: uuid.UUID | None
+    artifact_sha256: str | None
+    lock_version: int
+
+
+class PipelineDesignResponse(BaseModel):
+    """设计审查视图（API-04）；未冻结时 `plan` / `hocon` 为空而不是占位内容。"""
+
+    pipeline_version_id: uuid.UUID
+    status: PipelineVersionStatus
+    artifact_sha256: str | None
+    plan: dict[str, Any] | None
+    hocon: str | None
+
+
+class ApprovalRequestResponse(ResponseModel):
+    id: uuid.UUID
+    version_id: uuid.UUID
+    status: str
+    artifact_sha256: str
+    requested_by: uuid.UUID
+
+
+# ------------------------------------------------------------------ 生成记录（T-19 / T-18）
+class StartAgentRunRequest(BaseModel):
+    """发起生成；受管上下文由平台按 `profile_ids` 装配，调用方不直接给表结构。"""
+
+    profile_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
+    quality_contract: dict[str, Any] | None = None
+    incremental_contract: dict[str, Any] | None = None
+    row_llm_contract: dict[str, Any] | None = None
+
+
+class AnswerAgentRunRequest(BaseModel):
+    """回答澄清问题；从同一 `thread_id` 恢复，不重跑（FR-27）。"""
+
+    answer: str = Field(min_length=1, max_length=20_000)
+
+
+class AgentRunResponse(ResponseModel):
+    id: uuid.UUID
+    version_id: uuid.UUID
+    status: AgentRunStatus
+    thread_id: str
+    generation_phase: str | None
+    generation_backend: str | None
+    generation_model: str | None
+    pending_question: str | None
+    clarification_rounds: int
+    generation_candidates: int
+    generation_repairs: int
+    generation_diagnostics: dict[str, Any] | None
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None

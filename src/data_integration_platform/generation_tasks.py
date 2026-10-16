@@ -119,6 +119,18 @@ async def _run_generation(
             failure_reason=scrub_secrets(str(exc)),
             retryable=isinstance(exc, ExternalServiceUnavailable),
         )
+    except Exception as exc:
+        # 驱动层漏网的异常（HTTP 客户端、Checkpointer 的实现细节）**同样要先落事实**。
+        # 否则任务抛出去、事务回滚，运行会永久停在 RUNNING —— 与探查那边
+        # 「失败也要先记录终态」是同一条要求。
+        settlement = RunSettlement(
+            phase=GenerationPhase.FAILED.value,
+            status=AgentRunStatus.FAILED,
+            candidates=0,
+            repairs=0,
+            failure_reason=scrub_secrets(f"{type(exc).__name__}: {exc}"),
+            retryable=False,
+        )
 
     async with factory() as session:
         async with session.begin():

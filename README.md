@@ -130,6 +130,8 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | 新增一个枚举值后 PostgreSQL 插入报 `value too long` | 枚举列未指定长度时按「建表当时最长枚举值」生成 VARCHAR(n)。已固定为 `ENUM_COLUMN_LENGTH=64` 并由 `tests/test_schema_contract.py` 守住 |
 | SeaTunnel REST 按旧文档写 `/hazelcast/rest/maps/*` 全 404 | 2.3.13 的端点挂在**根**下（`/overview`、`/running-jobs`、`/encrypt-config`…）。另外 CLI 的 `--check` 校验的是**集群配置**、对作业配置是空操作，没有作业级 dry-run |
 | `/encrypt-config` 收 HOCON 文本一律回 `Invalid JSON format in request body.` | 该接口只吃 JSON 配置文档，且 `source`/`transform`/`sink` 必须是**插件对象数组**（传对象会报 `LinkedHashMap cannot be cast to ArrayList`）。候选 HOCON 由 `pyhocon` 转换后再送引擎 |
+| Worker 报 `Psycopg cannot use the 'ProactorEventLoop'` | Windows 上 asyncpg 与 psycopg **只能取交集**：asyncpg 两种循环都能跑，psycopg（LangGraph 的 Checkpoint 库）明确拒绝 Proactor。`asyncio_compat` 因此改用 `WindowsSelectorEventLoopPolicy` |
+| Celery 任务报 `This event loop is already running` | 在**已经是协程**的函数里调用 `run_in_transaction`（它内部走 `run_async` → `run_until_complete`）会二次进同一个循环。协程内部直接开会话，不要绕回同步桥接 |
 
 ## 交付里程碑
 
@@ -140,8 +142,7 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | M0 工程基座 | T-01 工程骨架 / T-02 配置边界 / T-03 基础设施编排 / T-04 可观测基座 | 已完成 |
 | M1 领域与身份 | T-05 枚举与状态机 / T-06 Harness 值对象 / T-07 数据模型与迁移 / T-08 身份与项目治理 / T-09 职责分离强制 | 已完成 |
 | M2 受管数据上下文 | T-10 探查契约 / T-11 七个探查器 / T-12 ClickHouse(GAP-01) / T-13 脱敏 / T-14 SecretProvider / T-15 凭据全生命周期 / T-16 文件与对象存储(GAP-02) / T-17 REST API(GAP-03) | 已完成 |
-| M3 生成与制品治理 | T-18 生成契约与直连后端 / T-19 LangGraph 状态机 / T-20 确定性门禁 / T-21 真实引擎检查 / T-22 不可变版本与 Artifact / T-23 调度策略 | 进行中 |
-| M3 余项 | 生成链路 API 与 Worker 接线 | 待开工 |
+| M3 生成与制品治理 | T-18 生成契约 / T-19 状态机 / T-20 确定性门禁 / T-21 真实引擎检查 / T-22 不可变版本 / T-23 调度策略 / 生成链路 API 与 Worker 接线 | **已完成** |
 | M4 Harness 安全内核 | T-24 ~ T-32 | 待开工 |
 | M5 三阶段协议与执行 | T-33 ~ T-40 | 待开工 |
 | M6 质量、监督与治理 | T-41 ~ T-46 | 待开工 |
@@ -149,9 +150,9 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | M8 评测与安全进化 | T-54 ~ T-58、T-63 | 待开工 |
 | M9 端到端与交付 | T-59 ~ T-62 | 待开工 |
 
-`api/routes/` 下已建全部 18 个 Router 模块并挂载，但只有 M0/M1 覆盖的
-`health` 与 `projects` 实现了端点；其余模块当前只有空的 `APIRouter` 对象，
-由对应里程碑填充。
+`api/routes/` 下已建全部 18 个 Router 模块并挂载：M0 ~ M3 覆盖的 `health` / `projects` /
+`connections` / `file_assets` / `pipelines` / `agent_runs` 已实现端点，
+其余模块仍是空的 `APIRouter` 对象，由对应里程碑填充。
 
 ## 明确不做（避免误判）
 

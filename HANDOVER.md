@@ -8,15 +8,15 @@
 
 ## 1. 一句话现状
 
-M0 / M1 / M2 **已完成并真实验证**；M3 的任务（T-18 ~ T-23）**全部完成**
-（其中 T-21 引擎检查已对真实 SeaTunnel 2.3.13 跑通），
-只差把生成链路的 API 与 Worker 接起来 —— 见 §3 第四步。
+M0 ~ M3 **全部完成**：生成链路（创建版本 → 发起生成 → 澄清 → 设计审查 → 门禁 →
+真实引擎检查 → 冻结 → 提交审批）已用**真实 DeepSeek + 真实 SeaTunnel 2.3.13** 端到端跑通，
+见 §3 第四步的记录。下一步是 M4（Harness 安全内核，T-24 ~ T-32）。
 
 接手时先确认仓库是好的：
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-uv run pytest                    # 期望 440 passed
+uv run pytest                    # 期望 465 passed
 docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在跑
 ```
 
@@ -37,6 +37,9 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 | **FR-33** 逐行 LLM Transform | **只做门禁侧** | 默认严格关闭、开启需独立密钥与出口白名单，这两条已落配置与门禁；能力本身未实现（按决策 Q7「按参考实现交付」，等 M3 后半段评估）。 |
 | **T-15 的 Vault 真实验证** | **用假服务代替** | 本机拉不到 `hashicorp/vault` 镜像，集成测试用一个实现 KV v2 语义的本地 HTTP 服务代替（`tests/integration/test_secret_lifecycle_live.py`）。**Vault 客户端代码已被真实请求路径验证，但没对真实 Vault 验证过。** |
 | ClickHouse / Oracle / Hive / HDFS | **只有契约测试** | 这四类镜像拉不到，真库验证做不了。由 `tests/test_probe_contracts.py` 覆盖（无无界 COUNT、有受限行数、拒绝标识符注入、注册表覆盖全类型）。**不要写成「已真实验证」。** |
+| **「提交审批」只做到创建审批单** | **只做了一半** | 版本状态迁到 `WAITING_APPROVAL` 并落一条绑定 `artifact_sha256` 的 `ApprovalRequest`。**审批决策（通过/驳回）、双人职责分离、能力令牌与执行准备单都还没做**，属 M5 的 T-33 ~ T-36。 |
+| **`schedules` 路由仍是空壳** | **未做** | T-23 的调度**用例**（`application/schedules.py`）已完成并经真实引擎无关的纯计算测试，但 SPEC §6.1 里那 3 个调度端点还没接 —— 本轮的接线范围只到生成链路。 |
+| 调度扫描与 Beat | **未做** | `PipelineScheduleService.advance` 是扫描要调的那一步，但周期扫描任务属 T-39（M5）。压测前不会自己触发。 |
 | M7 控制台（T-47~T-53） | **只有骨架** | 前端是五视图骨架 + 原型设计令牌，页面逻辑未做。M2/M3 的后端接口目前**没有前端在用**。 |
 
 ### 一处刻意的硬失败边界（不是 bug）
@@ -108,16 +111,46 @@ Port + Adapter，没有做注册表** —— 执行引擎只有 SeaTunnel 一家
 配置调度要求版本**已冻结**（`artifact_sha256` 非空）；「已批准才能启用」这条属 FR-65，
 留给 M5 的扫描与执行阶段，别在这一层假装已经做到。
 
-### 第四步：把生成链路接起来
+### 第四步：把生成链路接起来 —— 已完成，并已真实跑通
 
-`pipelines` / `agent_runs` 路由目前是空壳（只有 `APIRouter` 对象，没有端点）。
-需要：创建版本 → 发起生成 → 澄清回答 → 设计审查视图 → 门禁结果 → 冻结 → 提交审批。
-Celery 任务参照 `connection_tasks.py` 的模式（`run_in_transaction` + `dispatch`）。
+端点（SPEC §6.2）：`POST /pipelines`（API-01）、`POST /pipeline-versions/{id}/revisions`、
+`GET /pipelines/versions/{id}/design`（API-04）、`POST /pipeline-versions/{id}/approval-requests`、
+`POST /pipeline-versions/{id}/agent-runs`（API-02）、`POST /agent-runs/{id}/answers`（API-03）、
+`GET /agent-runs/{id}`。
+
+Worker 侧：`application/generation_runs.py`（受理 / 受管上下文 / 结论落地）+
+`generation_tasks.py`（Celery 任务）。三段式：**短事务取上下文 → 不占事务跑状态机 →
+短事务落结论**。
+
+两个刻意的设计决定：
+
+- **冻结由 Worker 做，不单开端点。** FR-35 要求「通过门禁与真实引擎检查后才允许冻结」；
+  放在状态机出边之后这条顺序是结构上成立的，开成两个入口就得靠调用方记得先跑门禁。
+- **澄清答案随任务载荷走，不落业务库。** 生成过程的中间状态归 Checkpoint 库（`dip_checkpoint`），
+  业务库只记结论。
+
+真实端到端验证记录（2026-10-16，MySQL `source_db.orders` → Doris `ods.order_logs`）：
+
+```
+create version → DRAFT
+start agent run → QUEUED →（Worker）RUNNING → WAITING_APPROVAL
+  candidates=1 repairs=0，generation_phase=WAIT_FOR_REVIEW
+design view: VALIDATED，artifact_sha256=67a5bb25…（HOCON 从冻结制品读回）
+submit approval → 201 PENDING，绑定同一摘要；重复提交被拒
+revision → v2，parent_version_id 指向 v1，v1 状态与摘要未动
+```
 
 ### 需要用户提供的东西
 
-**LLM 接入信息尚未提供**：`base_url` / `model` / `api_key`。写进 `.env`（已被 `.gitignore` 排除）。
-拿到之后 `DirectGenerationAdapter` 就能真实跑通；在此之前只能用剧本化假后端测试状态机。
+**LLM 接入信息已提供并写进 `.env`**（`.env` 被 `.gitignore` 排除，不入仓库）：
+`DIP_LLM_BASE_URL` / `DIP_LLM_API_KEY` / `DIP_LLM_MODEL`。
+
+⚠️ **注意协议差别**：给的是 `https://api.deepseek.com/anthropic`（Anthropic Messages 协议），
+而本项目的 `DirectGenerationAdapter` 走 **OpenAI 兼容**的 `{base}/chat/completions`，
+所以 `.env` 里写的是 `https://api.deepseek.com`（同一个 key 与模型，实测两套协议都通）。
+要换成 Anthropic 协议得改 Adapter，不是改配置能解决的事。
+
+`.env` 里的 `DIP_BOOTSTRAP_ENABLED` 用完应改回 `false`（FR-05：初始化是一次性动作）。
 
 ---
 
@@ -149,6 +182,14 @@ Celery 任务参照 `connection_tasks.py` 的模式（`run_in_transaction` + `di
    而 Docker 只发布 IPv4（实测 Redis 差 250 倍，且无超时的客户端会直接挂住）。
 4. **Worker 必须进程级复用同一个事件循环**（`asyncio_compat`）。每个任务 `asyncio.run`
    新建循环会让连接池绑在旧循环上，报 `'NoneType' object has no attribute 'send'`。
+   **Windows 上这个循环用 Selector 而不是 Proactor**：asyncpg 两种都能跑（实测），
+   而 psycopg（LangGraph 的 Checkpoint 库）明确拒绝 Proactor —— Selector 是唯一交集。
+5b. **在协程里不要用 `run_in_transaction`**：它内部是 `run_async` → `run_until_complete`，
+   协程已经在那条循环上跑着，再进去就是「事件循环已在运行」。协程内部直接 `async with
+   SessionFactory()`。
+5c. **未预期的异常也要先落事实**。生成任务的 `_invoke` 一度只捕获 `DomainError`，
+   结果 Checkpointer 的实现异常直接抛出、事务回滚，运行**永久停在 RUNNING**。
+   与探查那边「失败也要先记录终态」是同一条要求。
 5. **`.delay()` 不能在 async 路由里直接调用**（同步阻塞会卡住整个事件循环），
    统一走 `celery_app.dispatch` 卸载到线程。
 6. **凭据操作不做自动重试**（可能已部分生效，重试会放大问题）；
