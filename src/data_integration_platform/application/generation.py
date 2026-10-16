@@ -12,12 +12,13 @@
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from data_integration_platform.config import get_settings
-from data_integration_platform.domain.enums import ScheduleMode
+from data_integration_platform.domain.enums import GenerationKind, ScheduleMode
 from data_integration_platform.domain.errors import DomainError
 
 # 模型有时会把 JSON 包在 ```json 围栏里；这里容忍围栏，但不容忍多块内容。
@@ -166,25 +167,70 @@ class GenerationRequest(BaseModel):
     repair_hint: str | None = None
 
 
-def parse_candidate(raw: str) -> GeneratedCandidate:
-    """把模型原始响应解析成候选；结构不闭合即失败，且失败原因可读。
+@dataclass(frozen=True, slots=True)
+class GenerationOutcome:
+    """一次模型调用的分类结果；正是状态机 `route_generation` 的三个分支。"""
 
-    三类结构问题在进入门禁之前就被挡住（T-18 的「候选完整性」）：
-    截断的 JSON、缺失的必填块、以及非单块的 HOCON。
+    kind: GenerationKind
+    candidate: GeneratedCandidate | None = None
+    question: str | None = None
+    error: str | None = None
+
+    @classmethod
+    def needs_input(cls, text: str) -> "GenerationOutcome":
+        return cls(kind=GenerationKind.QUESTION, question=text)
+
+    @classmethod
+    def ready(cls, candidate: GeneratedCandidate) -> "GenerationOutcome":
+        return cls(kind=GenerationKind.CONFIG, candidate=candidate)
+
+    @classmethod
+    def invalid(cls, reason: str) -> "GenerationOutcome":
+        return cls(kind=GenerationKind.ERROR, error=reason)
+
+
+def parse_generation_outcome(raw: str) -> GenerationOutcome:
+    """把模型原始响应分类为 QUESTION / CONFIG / ERROR。
+
+    **不抛异常**：结构失败本就是状态机要处理的一种正常结果（进入修复分支），
+    把它当异常抛出会让「候选完整性失败也消耗修复预算」这条规则难以表达。
     """
-    payload = _extract_json_object(raw)
     try:
+        payload = _extract_json_object(raw)
         parsed = json.loads(payload)
+    except DomainError as exc:
+        return GenerationOutcome.invalid(str(exc))
     except json.JSONDecodeError as exc:
-        raise DomainError(f"候选不是合法 JSON：第 {exc.lineno} 行 {exc.msg}") from exc
+        return GenerationOutcome.invalid(f"候选不是合法 JSON：第 {exc.lineno} 行 {exc.msg}")
+
     if not isinstance(parsed, dict):
-        raise DomainError("候选取必须是 JSON 对象")
+        return GenerationOutcome.invalid("候选取必须是 JSON 对象")
+
+    # 参数不足时模型应当反问，而不是臆造参数（FR-26）。
+    if "plan" not in parsed:
+        question = parsed.get("question")
+        if isinstance(question, str) and question.strip():
+            return GenerationOutcome.needs_input(question.strip()[:2000])
+        return GenerationOutcome.invalid("候选既没有 plan 也没有 question，无法判定意图")
+
     try:
         candidate = GeneratedCandidate.model_validate(parsed)
     except ValidationError as exc:
-        raise DomainError(f"候选结构不符合 EtlPlan 契约：{_first_error(exc)}") from exc
-    _require_single_hocon_block(candidate.hocon)
-    return candidate
+        return GenerationOutcome.invalid(f"候选结构不符合 EtlPlan 契约：{_first_error(exc)}")
+    try:
+        _require_single_hocon_block(candidate.hocon)
+    except DomainError as exc:
+        return GenerationOutcome.invalid(str(exc))
+    return GenerationOutcome.ready(candidate)
+
+
+def parse_candidate(raw: str) -> GeneratedCandidate:
+    """严格版：要求一定是候选；用于「我就要一份候选」的调用方与测试。"""
+    outcome = parse_generation_outcome(raw)
+    if outcome.candidate is None:
+        reason = outcome.error or f"模型返回了 {outcome.kind.value}，不是候选"
+        raise DomainError(reason)
+    return outcome.candidate
 
 
 def require_no_inline_secrets(hocon: str) -> None:

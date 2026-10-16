@@ -55,6 +55,14 @@ class GateKind(StrEnum):
     INCREMENTAL_CONTRACT = "INCREMENTAL_CONTRACT"
     DORIS_PROJECTION = "DORIS_PROJECTION"
     ROW_LLM_CONTRACT = "ROW_LLM_CONTRACT"
+    # 真实引擎检查（T-21）：由引擎检查器**追加**到报告里，不属于下面那七项确定性检查。
+    # 单独成一类是因为状态机需要区分「确定性失败」与「引擎失败」——
+    # 两者的修复提示措辞不同，虽然它们共享同一份候选预算。
+    ENGINE_CHECK = "ENGINE_CHECK"
+
+
+# 确定性门禁的七项；`evaluate()` 只产出这些，引擎检查由调用方追加。
+DETERMINISTIC_GATE_KINDS = frozenset(kind for kind in GateKind if kind is not GateKind.ENGINE_CHECK)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +75,10 @@ class GateFinding:
 @dataclass(frozen=True, slots=True)
 class GateReport:
     findings: tuple[GateFinding, ...]
+
+    def engine_failed(self) -> bool:
+        """真实引擎检查是否未通过（T-21）；据此区分修复提示的措辞。"""
+        return any(item.kind is GateKind.ENGINE_CHECK and not item.passed for item in self.findings)
 
     @property
     def passed(self) -> bool:
@@ -269,6 +281,11 @@ def _row_llm_contract(*, plan: EtlPlan) -> GateFinding:
 def _column_names(columns: Sequence[Mapping[str, Any]] | None) -> frozenset[str]:
     """Profile 落库的字段清单是 `list[dict]`（见 `ProbeResult.canonical_columns`）。"""
     return frozenset(str(column["name"]) for column in (columns or ()) if column.get("name"))
+
+
+def with_engine_check(report: GateReport, finding: GateFinding) -> GateReport:
+    """把真实引擎检查的结论追加到确定性门禁报告上 —— 两者共享同一份候选预算。"""
+    return GateReport(findings=(*report.findings, finding))
 
 
 def facts_from_profile(

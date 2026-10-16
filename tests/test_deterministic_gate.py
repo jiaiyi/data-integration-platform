@@ -10,6 +10,7 @@ import pytest
 
 from data_integration_platform.application.generation import GeneratedCandidate
 from data_integration_platform.application.policy import (
+    DETERMINISTIC_GATE_KINDS,
     GateKind,
     SourceFacts,
     TargetFacts,
@@ -112,7 +113,9 @@ def test_baseline_candidate_passes_every_gate() -> None:
         target=TargetFacts(connector_type=ConnectorType.DORIS, columns=TARGET_COLUMNS),
     )
     assert report.passed, report.repair_hint()
-    assert {finding.kind for finding in report.findings} == set(GateKind)
+    assert {finding.kind for finding in report.findings} == DETERMINISTIC_GATE_KINDS
+    # 真实引擎检查由引擎检查器追加，不属于这七项；确定性门禁不该替它下结论。
+    assert GateKind.ENGINE_CHECK not in DETERMINISTIC_GATE_KINDS
     assert report.repair_hint() is None
 
 

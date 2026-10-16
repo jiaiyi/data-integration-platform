@@ -175,6 +175,14 @@ class AgentRunStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class GenerationKind(StrEnum):
+    """模型一次调用的分类结果；状态机据此走澄清 / 门禁 / 修复三个分支。"""
+
+    QUESTION = "question"
+    CONFIG = "config"
+    ERROR = "error"
+
+
 class ExecutionStatus(StrEnum):
     QUEUED = "QUEUED"
     SUBMITTED = "SUBMITTED"
