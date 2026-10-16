@@ -197,14 +197,15 @@ def require_no_inline_secrets(hocon: str) -> None:
 
 
 def _extract_json_object(raw: str) -> str:
-    """取出 JSON 主体：容忍 ```json 围栏，也容忍前后夹杂的说明文字。"""
+    """取出 JSON 主体：先剥代码围栏，再截取最外层对象。
+
+    容忍模型夹带的说明文字（这是常态，不该因此判候选无效）；**不**容忍截断与多对象 ——
+    这两种会被 `json.loads` 挡下（缺右括号报解析错误，多对象报 Extra data）。
+    结构是否可信由解析结果裁决，而不是靠数围栏。
+    """
     text = raw.strip()
     fenced = _JSON_FENCE.search(text)
     if fenced is not None:
-        remainder = _JSON_FENCE.sub("", text).strip()
-        if remainder:
-            # 围栏之外还有正文，说明模型返回了多块内容，结构不可信。
-            raise DomainError("候选包含代码围栏之外的额外内容，结构不可信")
         text = fenced.group("body").strip()
     start = text.find("{")
     end = text.rfind("}")
