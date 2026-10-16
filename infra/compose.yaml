@@ -95,6 +95,23 @@ services:
       doris-network:
         ipv4_address: 172.30.80.3
 
+  # 对象存储（GAP-02）：MinIO 说 S3 协议，因此同一套探查器也覆盖 AWS S3。
+  # 镜像标签可覆盖：本机可用的存档版本被设为默认值，避免依赖在线拉取（ENV-03）。
+  # 这里**不设健康检查、也不配 init 容器**：MinIO 镜像不含 mc/curl，
+  # 让集成测试自己等就绪并建桶，比塞一个假装“就绪”的探针更诚实（ENV-07）。
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2023-03-20T20-16-18Z}
+    profiles: ["e2e"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: dip_minio
+      MINIO_ROOT_PASSWORD: dip_minio_e2e
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
   # Doris FE 起来不等于业务可用（ENV-07）：仍要等 MySQL 协议查询成功并建库建表。
   doris-init:
     image: mysql:8.4
@@ -156,6 +173,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  minio-data:
   mysql-e2e-data:
   doris-fe-data:
   doris-fe-log:

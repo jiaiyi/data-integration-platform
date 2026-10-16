@@ -85,7 +85,7 @@ uv run alembic upgrade head
 ```
 
 端口：postgres `5432`、redis **`16379`**（容器内仍是 6379）、mysql-e2e `13306`、
-Doris FE `8030/9030`、SeaTunnel REST `8080`。
+MinIO `9000`（控制台 `9001`）、Doris FE `8030/9030`、SeaTunnel REST `8080`。
 
 **redis 为什么发布到 16379**：宿主机 6379 常被本机原生 Redis 占用，而 Docker 在这种情况下**不报错** ——
 容器照样 `Up (healthy)`，只是端口发布静默失效（`docker inspect` 里 `NetworkSettings.Ports` 为空、
@@ -104,10 +104,27 @@ docker ps --format "{{.Names}} {{.Ports}}"             # 期望 0.0.0.0:16379->6
 ```bash
 uv run ruff check .            # 静态检查
 uv run mypy                    # 严格类型检查
-uv run pytest                  # 单元测试
+uv run pytest                  # 单元测试 + 契约测试
+uv run pytest -m integration   # 真库集成测试（需 --profile e2e 起的 PostgreSQL / MySQL / MinIO）
 docker compose -f infra/compose.yaml config --quiet   # 编排语法
 cd frontend && npm run build   # 前端构建（含 vue-tsc）
 ```
+
+> 集成测试在对应服务未启动时**整组跳过**，不会把「没跑」伪装成「跑过了」。
+> 拉不到镜像的数据源（Oracle / SQL Server / Hive / HDFS / ClickHouse）无法真库验证，
+> 由 `tests/test_probe_contracts.py` 用 SQL 契约测试覆盖（无无界 COUNT、有受限行数、拒绝注入）。
+
+### 本机联调已踩过的坑
+
+| 现象 | 原因与处置 |
+|------|-----------|
+| 请求挂到超时，服务端日志却显示已处理完 | 本机配了系统 HTTP 代理，回环请求被代理劫走。客户端脚本加 `trust_env=False` |
+| 连接常常先卡几秒才通 | Windows 把 `localhost` 优先解析到 IPv6 `::1`，而 Docker 只发布 IPv4。默认连接串一律写 `127.0.0.1`（实测 Redis 5.03s vs 0.02s） |
+| `redis://localhost:6379` 连上了却不是本项目的数据 | 宿主 6379 被本机原生 Redis 占用，且 Docker 不报错、只是端口发布静默失效。本项目固定发布到 16379 |
+| 中文数据落库变成 `å¼ ä¸‰` | MySQL 入口脚本默认不以 utf8mb4 执行 init SQL。`infra/e2e/mysql-init.sql` 顶部已加 `SET NAMES utf8mb4;` |
+| Worker 报 `'NoneType' object has no attribute 'send'` | 每个任务用 `asyncio.run` 新建事件循环，而连接池绑在旧循环上。`asyncio_compat` 改为进程级复用同一事件循环 |
+| 内网地址（Vault / Webhook / REST 数据源）报 502 或连不上 | 系统 HTTP 代理把外发请求劫走 —— **顺带会把 Vault token、鉴权头交给未知中间人**。平台主动外发一律 `trust_env=False` |
+| 新增一个枚举值后 PostgreSQL 插入报 `value too long` | 枚举列未指定长度时按「建表当时最长枚举值」生成 VARCHAR(n)。已固定为 `ENUM_COLUMN_LENGTH=64` 并由 `tests/test_schema_contract.py` 守住 |
 
 ## 交付里程碑
 
@@ -117,7 +134,7 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 |------|------|------|
 | M0 工程基座 | T-01 工程骨架 / T-02 配置边界 / T-03 基础设施编排 / T-04 可观测基座 | 已完成 |
 | M1 领域与身份 | T-05 枚举与状态机 / T-06 Harness 值对象 / T-07 数据模型与迁移 / T-08 身份与项目治理 / T-09 职责分离强制 | 已完成 |
-| M2 受管数据上下文 | T-10 ~ T-17（含 GAP-01 ClickHouse / GAP-02 S3-MinIO / GAP-03 REST API） | 待开工 |
+| M2 受管数据上下文 | T-10 探查契约 / T-11 七个探查器 / T-12 ClickHouse(GAP-01) / T-13 脱敏 / T-14 SecretProvider / T-15 凭据全生命周期 / T-16 文件与对象存储(GAP-02) / T-17 REST API(GAP-03) | 已完成 |
 | M3 生成与制品治理 | T-18 ~ T-23 | 待开工 |
 | M4 Harness 安全内核 | T-24 ~ T-32 | 待开工 |
 | M5 三阶段协议与执行 | T-33 ~ T-40 | 待开工 |

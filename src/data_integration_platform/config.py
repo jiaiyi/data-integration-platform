@@ -8,12 +8,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
 
+from cryptography.fernet import Fernet
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from data_integration_platform.domain.supervision import RuntimeBudget
 
 PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production"})
+
+
+def _parse_host_list(raw: str) -> frozenset[str]:
+    """解析逗号分隔的主机白名单；大小写不敏感，空串得到空集合（= 全部拒绝）。"""
+    return frozenset(host.strip().casefold() for host in raw.split(",") if host.strip())
 
 
 class Settings(BaseSettings):
@@ -37,13 +43,84 @@ class Settings(BaseSettings):
     bootstrap_token: SecretStr | None = None
 
     # ---- 状态与消息 ----
-    database_url: str = "postgresql+asyncpg://dip:dip@localhost:5432/dip"
+    # 一律写 127.0.0.1 而不是 localhost：Windows 上 `localhost` 会优先解析到 IPv6 `::1`，
+    # 而 Docker 默认只发布 IPv4，于是每次连接都要先等 `::1` 失败再回退 ——
+    # 实测 Redis 走 localhost 耗时 5.03s、走 127.0.0.1 只要 0.02s，且无超时的客户端会直接挂住。
+    database_url: str = "postgresql+asyncpg://dip:dip@127.0.0.1:5432/dip"
     checkpoint_database_url: str = (
-        "postgresql://dip_checkpoint:dip_checkpoint@localhost:5432/dip_checkpoint"
+        "postgresql://dip_checkpoint:dip_checkpoint@127.0.0.1:5432/dip_checkpoint"
     )
     # 与 infra/compose.yaml 的端口发布保持一致：宿主 6379 常被本机原生 Redis 占用，
     # 那种情况下 Docker 不报错、只是端口发布静默失效，连上去的是另一个 Redis。
-    redis_url: str = "redis://localhost:16379/0"
+    redis_url: str = "redis://127.0.0.1:16379/0"
+
+    # ---- 凭据存储（T-14）----
+    secret_provider: Literal["fernet-db", "vault-kv-v2"] = "fernet-db"
+    secret_master_key: SecretStr | None = None
+    vault_address: AnyHttpUrl | None = None
+    vault_token: SecretStr | None = None
+    vault_namespace: str | None = Field(default=None, max_length=255)
+    vault_kv_mount: str = Field(default="secret", min_length=1, max_length=128)
+    vault_path_prefix: str = Field(default="dip/connections", min_length=1, max_length=384)
+    vault_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    vault_verify_tls: bool = True
+    # 轮换回退保留期：激活后多久之内仍可回到旧凭据（FR-20）。
+    secret_rotation_rollback_days: int = Field(default=7, ge=1, le=365)
+
+    # ---- 凭据到期告警（T-15 / FR-22）----
+    credential_alert_scan_interval_seconds: int = Field(default=3600, ge=60, le=86_400)
+    credential_alert_warning_cooldown_hours: int = Field(default=24, ge=1, le=720)
+    credential_alert_overdue_cooldown_hours: int = Field(default=6, ge=1, le=720)
+    credential_alert_webhook_url: AnyHttpUrl | None = None
+    # 配置后按 HMAC-SHA256 对请求体签名（X-DIP-Signature），供接收端验真。
+    credential_alert_webhook_signing_secret: SecretStr | None = None
+    credential_alert_webhook_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    # 平台主动外发（Webhook）的出口白名单；留空表示全部拒绝（失败关闭）。
+    credential_alert_webhook_allowed_hosts: str = ""
+
+    # ---- 元数据探查（T-10 ~ T-13）----
+    # Profile 是「有时效的事实」，不是永久 Schema（FR-13）。
+    profile_ttl_seconds: int = Field(default=86_400, ge=300, le=604_800)
+    # 受限查询：不允许无界全表 COUNT，采样行数有默认值与硬上限（FR-10）。
+    probe_sample_limit_default: int = Field(default=20, ge=1, le=100)
+    probe_sample_limit_max: int = Field(default=100, ge=1, le=1000)
+    probe_statement_timeout_seconds: int = Field(default=15, ge=1, le=300)
+
+    # ---- 远端文件探查（T-16 GAP-02 对象存储 / HDFS）----
+    # 只做前缀范围采样，严禁全量下载（决策 D-Q3）：对象可达 GB 级，
+    # 全量下载会打爆控制面内存与临时盘，属正确性问题而非性能优化。
+    remote_file_sample_bytes: int = Field(
+        default=8 * 1024 * 1024, ge=64 * 1024, le=64 * 1024 * 1024
+    )
+
+    # ---- REST API 数据源（T-17 GAP-03）----
+    # 出口主机白名单：逗号分隔；留空表示全部拒绝（失败关闭，不是全部放行）。
+    rest_api_allowed_hosts: str = ""
+    rest_api_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    rest_api_max_sample_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+
+    # ---- 生成与模型（T-18 / FR-24 ~ FR-33）----
+    # 生成后端：只改变「候选如何产生」，不影响门禁、版本、审批与 Harness 行为（FR-28）。
+    generation_backend: Literal["direct", "seatunnel-cli"] = "direct"
+    llm_base_url: AnyHttpUrl | None = None
+    llm_api_key: SecretStr | None = None
+    llm_model: str | None = Field(default=None, max_length=255)
+    llm_request_timeout_seconds: float = Field(default=180, gt=0, le=600)
+    # 候选总量上限 = 首次 1 份 + 修复次数。PRD 决策 Q1 定档为 3 份，且三类失败共享同一计数。
+    max_enterprise_repair_attempts: int = Field(default=2, ge=0, le=10)
+    # 逐行 LLM Transform：默认**严格关闭**；开启需独立密钥与出口白名单（FR-33 / 决策 Q7）。
+    row_llm_transform_enabled: bool = False
+    row_llm_api_key: SecretStr | None = None
+    row_llm_allowed_api_hosts: str = ""
+    row_llm_max_rows_per_second: int = Field(default=10, ge=1, le=100)
+
+    # ---- 数据面引擎（T-21）----
+    seatunnel_api_url: AnyHttpUrl = Field(default=AnyHttpUrl("http://127.0.0.1:8080"))
+    seatunnel_timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    seatunnel_check_timeout_seconds: int = Field(default=60, ge=5, le=600)
+
+    # ---- 制品存储（T-22）----
+    artifact_root: Path = Path("var/artifacts")
 
     # ---- 可观测 ----
     otel_enabled: bool = False
@@ -89,6 +166,14 @@ class Settings(BaseSettings):
             warning_ratio=self.harness_runtime_warning_ratio,
         )
 
+    def allowed_rest_api_hosts(self) -> frozenset[str]:
+        """解析出口主机白名单；大小写不敏感，空配置表示不放行任何主机。"""
+        return _parse_host_list(self.rest_api_allowed_hosts)
+
+    def allowed_webhook_hosts(self) -> frozenset[str]:
+        """Webhook 外发白名单；与 REST 数据源分开配置，两者都失败关闭。"""
+        return _parse_host_list(self.credential_alert_webhook_allowed_hosts)
+
     @model_validator(mode="after")
     def require_production_boundaries(self) -> Self:
         """生产环境必须使用可信网关身份，且共享密钥与 Bootstrap Token 具备足够熵。"""
@@ -106,7 +191,70 @@ class Settings(BaseSettings):
         token = self.bootstrap_token
         if token is not None and len(token.get_secret_value().encode("utf-8")) < 32:
             raise ValueError("首次初始化 Token 至少需要 32 字节")
+        self._require_credential_governance_boundaries()
+        self._require_generation_boundaries()
         return self
+
+    def _require_generation_boundaries(self) -> None:
+        """逐行 LLM Transform 的开启边界（FR-33 / 决策 Q7）。
+
+        模型能力默认**严格关闭**；一旦开启，就必须具备独立密钥与出口主机白名单 ——
+        这两条是「开启有边界」的实质内容，不是可选装饰。
+        """
+        key = self.row_llm_api_key
+        if self.row_llm_transform_enabled and key is None:
+            raise ValueError("启用逐行 LLM Transform 必须配置 DIP_ROW_LLM_API_KEY")
+        if self.row_llm_transform_enabled and not _parse_host_list(self.row_llm_allowed_api_hosts):
+            raise ValueError(
+                "启用逐行 LLM Transform 必须配置 DIP_ROW_LLM_ALLOWED_API_HOSTS"
+                "（出口白名单为空表示拒绝全部外发）"
+            )
+        if key is not None and len(key.get_secret_value().encode("utf-8")) < 16:
+            raise ValueError("逐行 LLM Transform 的密钥过短，请使用独立且足够强的密钥")
+        # 模型未配置不在这里报错：生成能力未就绪要**明确报告**而不是启动即挂（PRD §5.3）。
+
+    def _require_credential_governance_boundaries(self) -> None:
+        """凭据治理的部署边界：存储必须可用，外发告警必须受控。
+
+        本地允许「未就绪启动」——`/health` 会明确报告未就绪（PRD §5.3 不静默失败），
+        写凭据时失败关闭；生产则必须在启动期就拒绝。
+        """
+        webhook = self.credential_alert_webhook_url
+        if (
+            webhook is not None
+            and self.is_production
+            and self.credential_alert_webhook_signing_secret is None
+        ):
+            # 生产环境下未签名的外发告警无法被接收端验真，按失败关闭处理。
+            raise ValueError(
+                "生产环境配置凭据告警 Webhook 必须同时配置"
+                " DIP_CREDENTIAL_ALERT_WEBHOOK_SIGNING_SECRET"
+            )
+        if webhook is not None and not self.allowed_webhook_hosts():
+            raise ValueError(
+                "配置了凭据告警 Webhook 就必须在 "
+                "DIP_CREDENTIAL_ALERT_WEBHOOK_ALLOWED_HOSTS 中放行其主机"
+            )
+        if self.secret_provider == "vault-kv-v2":
+            if self.vault_address is None:
+                raise ValueError("secret_provider=vault-kv-v2 必须配置 DIP_VAULT_ADDRESS")
+            if self.vault_token is None:
+                raise ValueError("secret_provider=vault-kv-v2 必须配置 DIP_VAULT_TOKEN")
+            return
+
+        key = self.secret_master_key
+        if key is None:
+            if self.is_production:
+                raise ValueError("生产环境使用 fernet-db 必须配置 DIP_SECRET_MASTER_KEY")
+            return
+        try:
+            Fernet(key.get_secret_value().encode("utf-8"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "DIP_SECRET_MASTER_KEY 不是合法的 Fernet 密钥"
+                '（生成：python -c "from cryptography.fernet import Fernet;'
+                ' print(Fernet.generate_key().decode())"）'
+            ) from exc
 
 
 @lru_cache

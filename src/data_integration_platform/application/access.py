@@ -44,6 +44,37 @@ async def harness_roles_of(
     return frozenset(roles.all())
 
 
+async def require_harness_roles(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    allowed: Collection[HarnessRole],
+) -> frozenset[HarnessRole]:
+    """校验主体在项目内具备所需 Harness 职责槽。
+
+    这是「能批准/执行什么动作」的边界：项目成员角色管资源可见性，
+    职责槽管审批与授权，两者分开校验（PRD §2.3）。
+    """
+    roles = await harness_roles_of(session, project_id=project_id, actor_id=actor_id)
+    if not roles & set(allowed):
+        expected = "/".join(sorted(role.value for role in allowed))
+        raise PermissionDenied(f"缺少所需职责槽：{expected}")
+    return roles
+
+
+async def require_security_approver(
+    session: AsyncSession, *, project_id: uuid.UUID, actor_id: uuid.UUID
+) -> None:
+    """凭据类受管副作用的审批人必须是安全审批人（PRD §2.1 安全审批人职责）。"""
+    await require_harness_roles(
+        session,
+        project_id=project_id,
+        actor_id=actor_id,
+        allowed={HarnessRole.SECURITY_APPROVER},
+    )
+
+
 async def require_project_roles(
     session: AsyncSession,
     *,

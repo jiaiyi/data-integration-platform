@@ -2,7 +2,23 @@
 
 单元测试用内存 SQLite 承载 ORM，避免依赖本机 PostgreSQL：
 迁移与真实方言由 `alembic upgrade head` 单独验证，这里只验证应用行为。
+
+环境变量必须在**导入项目模块之前**设置：`config.get_settings` 是 `lru_cache` 单例，
+且 `main.py` 在导入时就会取一次，之后再设就晚了。
 """
+
+import os
+import tempfile
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+
+# 凭据存储需要主密钥；测试自备一把，不依赖开发者本地 .env。
+os.environ.setdefault("DIP_SECRET_MASTER_KEY", Fernet.generate_key().decode())
+# 受管文件资产写到临时目录，不污染仓库工作区。
+os.environ.setdefault(
+    "DIP_FILE_ASSET_ROOT", str(Path(tempfile.mkdtemp(prefix="dip-test-assets-")) / "root")
+)
 
 from collections.abc import AsyncIterator
 

@@ -1,5 +1,10 @@
 -- 主场景 A（PRD §9.12 / §10.2）源库：订单 + 用户，用于 MySQL → Doris 宽表增量同步。
 -- updated_at 是水位增量列；amount 允许为负、email/customer_name 允许脏值，用于触发质量分流。
+--
+-- 必须显式声明连接字符集：入口脚本默认不以 utf8mb4 执行本文件，中文会被当成 latin1
+-- 再编码一次，落库即乱码（实测踩过：`张三` 存成 `å¼ ä¸‰`）。
+SET NAMES utf8mb4;
+
 CREATE TABLE IF NOT EXISTS orders (
     id            BIGINT       NOT NULL AUTO_INCREMENT,
     user_id       BIGINT       NOT NULL,

@@ -89,10 +89,21 @@ from data_integration_platform.domain.supervision import (
 )
 from data_integration_platform.infrastructure.database import Base
 
+# 枚举列的固定长度。
+# 不指定时 SQLAlchemy 会按「创建时枚举值的最长值」生成 VARCHAR(n)，于是**新增一个更长的
+# 枚举值就会在 PostgreSQL 上插入失败**（SQLite 不校验长度，所以只在真库上暴露）。
+# 固定成宽裕长度后，枚举增长是纯代码变更，不再需要配套迁移。
+ENUM_COLUMN_LENGTH = 64
+
 
 def enum_column(enum_type: type[Any]) -> Enum:
     """把领域枚举保存为非原生字符串枚举，降低 PostgreSQL 枚举升级风险。"""
-    return Enum(enum_type, native_enum=False, validate_strings=True)
+    return Enum(
+        enum_type,
+        native_enum=False,
+        validate_strings=True,
+        length=ENUM_COLUMN_LENGTH,
+    )
 
 
 def _utcnow() -> datetime:
@@ -903,15 +914,25 @@ class EncryptedSecret(Base, TimestampMixin):
 
 
 class SecretMigrationRequest(Base, TimestampMixin):
-    """Provider 迁移；迁移过程不销毁源凭据，可回退（FR-18）。"""
+    """Provider 迁移；迁移过程不销毁源凭据，可回退（FR-18）。
+
+    以 `connection_id` 为必填锚点，`secret_id` 可空：Vault 后端的凭据在本地**没有密文行**，
+    只以 `vault://` 引用存在，若以 `secret_id` 为必填键，Vault 凭据根本无法登记迁移。
+    """
 
     __tablename__ = "secret_migration_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    secret_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("encrypted_secrets.id", ondelete="CASCADE"), nullable=False
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("data_connections.id", ondelete="CASCADE"), nullable=False
+    )
+    secret_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("encrypted_secrets.id", ondelete="SET NULL")
     )
     source_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 迁移前的引用必须留档：换掉连接的 secret_ref 之后就再也找不到源凭据了，
+    # 而 FR-18 要求「不销毁源凭据、可回退」——回退的依据就是这个引用。
+    source_secret_ref: Mapped[str | None] = mapped_column(String(512))
     target_provider: Mapped[str] = mapped_column(String(64), nullable=False)
     target_secret_ref: Mapped[str | None] = mapped_column(String(512))
     source_retained: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -927,21 +948,29 @@ class SecretMigrationRequest(Base, TimestampMixin):
 
 
 class SecretRotationRequest(Base, TimestampMixin):
-    """凭据轮换：暂存 → 验证 → 激活；激活前必须验证新凭据可用（FR-19）。"""
+    """凭据轮换：暂存 → 验证 → 激活；激活前必须验证新凭据可用（FR-19）。
+
+    暂存凭据由 Provider 落库，本表只保存 `staged_secret_ref` **引用** ——
+    再存一份 `staged_ciphertext` 会让密文有两个事实源，两处迟早不一致。
+    """
 
     __tablename__ = "secret_rotation_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    secret_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("encrypted_secrets.id", ondelete="CASCADE"), nullable=False
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("data_connections.id", ondelete="CASCADE"), nullable=False
+    )
+    secret_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("encrypted_secrets.id", ondelete="SET NULL")
     )
     status: Mapped[SecretRotationStatus] = mapped_column(
         enum_column(SecretRotationStatus), nullable=False, default=SecretRotationStatus.VALIDATING
     )
     previous_secret_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    # 旧凭据的签发时间也要留档：激活时会把连接的签发时间改成「新凭据的起点」，
+    # 回退时必须还原，否则到期告警会失去依据（要么误报，要么被悄悄关掉）。
+    previous_credential_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     staged_secret_ref: Mapped[str | None] = mapped_column(String(512))
-    staged_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
-    staged_key_id: Mapped[str | None] = mapped_column(String(128))
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rollback_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -959,6 +988,9 @@ class SecretRotationRollbackRequest(Base, TimestampMixin):
     __tablename__ = "secret_rotation_rollback_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("data_connections.id", ondelete="CASCADE"), nullable=False
+    )
     rotation_request_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("secret_rotation_requests.id", ondelete="CASCADE"),
@@ -978,13 +1010,20 @@ class SecretRotationRollbackRequest(Base, TimestampMixin):
 
 
 class SecretDestructionRequest(Base, TimestampMixin):
-    """凭据销毁：只作用于轮换源凭据或已回退的暂存凭据（FR-21）。"""
+    """凭据销毁：只作用于轮换源凭据或已回退的暂存凭据（FR-21）。
+
+    销毁对象由 `target` + `source_rotation_request_id` 共同确定，
+    实际要销毁的引用从轮换记录里推导，**不接受调用方直接指定任意 secret_ref**。
+    """
 
     __tablename__ = "secret_destruction_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    secret_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("encrypted_secrets.id", ondelete="CASCADE"), nullable=False
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("data_connections.id", ondelete="CASCADE"), nullable=False
+    )
+    secret_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("encrypted_secrets.id", ondelete="SET NULL")
     )
     target: Mapped[SecretDestructionTarget] = mapped_column(
         enum_column(SecretDestructionTarget), nullable=False

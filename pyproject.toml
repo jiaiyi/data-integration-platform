@@ -12,8 +12,32 @@ dependencies = [
     "alembic>=1.16,<2",
     "asyncpg>=0.30,<1",
     "celery[redis]>=5.5,<6",
+    # 凭据加密存储（T-14 Fernet）与 Harness 分离签名（M4 Ed25519）
+    "cryptography>=45,<52",
+    # 元数据探查驱动（T-11 / T-12）：与 SPEC §2.2 的覆盖清单一一对应
+    "clickhouse-connect>=0.8,<1",
+    "oracledb>=2.5,<4",
+    "pure-sasl>=0.6,<1",
+    "pyhive>=0.7,<1",
+    "pymysql>=1.1,<2",
+    "python-tds>=1.17,<2",
+    "thrift>=0.20,<1",
+    "thrift-sasl>=0.4,<1",
+    # 对象存储（T-16 GAP-02）：MinIO 客户端同时兼容 AWS S3 API
+    "minio>=7.2,<8",
+    # 显式声明：Minio 构造器的超时只能通过 urllib3 客户端注入，属直接使用
+    "urllib3>=2,<3",
+    # 受管文件格式（T-16）：CSV/JSON/JSONL/Markdown 用标准库，其余见下
+    "defusedxml>=0.7,<1",
+    "openpyxl>=3.1,<4",
+    "pyarrow>=17,<24",
+    "pyorc>=0.9,<1",
+    "pypdf>=5,<7",
     "fastapi>=0.116,<1",
     "httpx>=0.28,<1",
+    # 生成状态机与可恢复中断（T-19）；Checkpoint 落独立库，不代替审批、授权与执行台账
+    "langgraph>=0.6,<2",
+    "langgraph-checkpoint-postgres>=2.0,<4",
     "opentelemetry-api>=1.37,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.37,<2",
     "opentelemetry-instrumentation-celery>=0.58b0,<1",
@@ -22,6 +46,11 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.58b0,<1",
     "opentelemetry-sdk>=1.37,<2",
     "pydantic-settings>=2.10,<3",
+    # langgraph-checkpoint-postgres 走 psycopg（v3），binary 额外项自带 libpq；
+    # 控制面业务真相仍用 asyncpg，两者互不影响。
+    "psycopg[binary]>=3.2,<4",
+    # 文件资产上传走 multipart/form-data（T-16）
+    "python-multipart>=0.0.20,<1",
     "redis>=5,<7",
     "sqlalchemy[asyncio]>=2.0.41,<3",
     "structlog>=25,<26",
@@ -36,6 +65,7 @@ dev = [
     "pytest-asyncio>=1.1,<2",
     "pytest-cov>=6.2,<7",
     "ruff>=0.12,<1",
+    "types-defusedxml>=0.7,<1",
 ]
 
 [project.scripts]
@@ -56,6 +86,7 @@ markers = [
     "simulation_l0: 无外部副作用的静态策略、权限与制品攻击仿真",
     "simulation_l1: 仅在模拟器内注入故障、重放、超时和部分成功",
     "simulation_l2: 需要开发 Compose 的真实 MySQL/文件、SeaTunnel 与 Doris 链路",
+    "integration: 需要 Compose 起的真实 PostgreSQL / MySQL / MinIO；未启动时整组跳过",
 ]
 
 [tool.ruff]
@@ -83,6 +114,36 @@ strict = true
 plugins = ["pydantic.mypy"]
 packages = ["data_integration_platform"]
 
+# Celery 未发布类型声明，`@celery_app.task` 装饰器因此是 untyped；
+# 只在任务模块内放宽这一条，任务体本身仍按严格模式检查。
+# 逐个列出（mypy 的模式不支持 `*_tasks` 这种部分通配），新增任务模块时同步补上。
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "celery.*"]
+module = [
+    "data_integration_platform.connection_tasks",
+    "data_integration_platform.credential_alert_tasks",
+    "data_integration_platform.secret_destruction_tasks",
+    "data_integration_platform.secret_migration_tasks",
+    "data_integration_platform.secret_rotation_rollback_tasks",
+    "data_integration_platform.secret_rotation_tasks",
+]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = [
+    "asyncpg.*",
+    "celery.*",
+    "clickhouse_connect.*",
+    "minio.*",
+    "openpyxl.*",
+    "oracledb.*",
+    "pyarrow.*",
+    "pyhive.*",
+    "pymysql.*",
+    "pyorc.*",
+    "pypdf.*",
+    "puresasl.*",
+    "pytds.*",
+    "thrift.*",
+    "thrift_sasl.*",
+]
 ignore_missing_imports = true
