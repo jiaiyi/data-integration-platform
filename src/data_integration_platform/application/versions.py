@@ -49,6 +49,7 @@ from data_integration_platform.domain.harness import (
 from data_integration_platform.domain.state_machine import require_pipeline_transition
 from data_integration_platform.infrastructure.models import (
     ApprovalRequest,
+    ExecutionPreparation,
     Pipeline,
     PipelineArtifact,
     PipelineVersion,
@@ -402,6 +403,72 @@ class PipelineVersionService:
             artifact_sha256=version.artifact_sha256,
             plan=plan,
             hocon=hocon,
+        )
+
+    async def approval_requests(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        status: ApprovalStatus | None = None,
+    ) -> list[ApprovalRequest]:
+        """项目内待批/已批的版本审批单；审批台的入口问题就是它。"""
+        await require_project_roles(
+            session, project_id=project_id, actor_id=actor_id, allowed=READABLE
+        )
+        statement = (
+            select(ApprovalRequest)
+            .join(PipelineVersion, PipelineVersion.id == ApprovalRequest.version_id)
+            .join(Pipeline, Pipeline.id == PipelineVersion.pipeline_id)
+            .where(Pipeline.project_id == project_id)
+        )
+        if status is not None:
+            statement = statement.where(ApprovalRequest.status == status)
+        rows = await session.scalars(statement.order_by(ApprovalRequest.created_at.desc()))
+        return list(rows.all())
+
+    async def approval_request(
+        self, session: AsyncSession, *, approval_id: uuid.UUID, actor_id: uuid.UUID
+    ) -> ApprovalRequest:
+        request = await session.get(ApprovalRequest, approval_id)
+        if request is None:
+            raise ResourceNotFound("审批单不存在")
+        version = await self._require_version(session, request.version_id)
+        await self._require_readable(session, version=version, actor_id=actor_id)
+        return request
+
+    async def preparations_of(
+        self, session: AsyncSession, *, version_id: uuid.UUID, actor_id: uuid.UUID
+    ) -> list[ExecutionPreparation]:
+        """某版本下的执行准备单（最新在前）；审批台据此知道「有什么在等我」。"""
+        version = await self._require_version(session, version_id)
+        await self._require_readable(session, version=version, actor_id=actor_id)
+        rows = await session.scalars(
+            select(ExecutionPreparation)
+            .where(ExecutionPreparation.pipeline_version_id == version_id)
+            .order_by(ExecutionPreparation.created_at.desc())
+        )
+        return list(rows.all())
+
+    async def preparation(
+        self, session: AsyncSession, *, preparation_id: uuid.UUID, actor_id: uuid.UUID
+    ) -> ExecutionPreparation:
+        row = await session.get(ExecutionPreparation, preparation_id)
+        if row is None:
+            raise ResourceNotFound("执行准备单不存在")
+        version = await self._require_version(session, row.pipeline_version_id)
+        await self._require_readable(session, version=version, actor_id=actor_id)
+        return row
+
+    async def _require_readable(
+        self, session: AsyncSession, *, version: PipelineVersion, actor_id: uuid.UUID
+    ) -> None:
+        pipeline = await session.get(Pipeline, version.pipeline_id)
+        if pipeline is None:
+            raise ResourceNotFound("管道不存在")
+        await require_project_roles(
+            session, project_id=pipeline.project_id, actor_id=actor_id, allowed=READABLE
         )
 
     async def artifacts_of(

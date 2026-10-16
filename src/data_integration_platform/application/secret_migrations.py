@@ -12,22 +12,28 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from data_integration_platform.application.access import (
-    require_project_roles,
-    require_security_approver,
-)
+from data_integration_platform.application.access import require_project_roles
 from data_integration_platform.application.audit import record_audit_event
 from data_integration_platform.application.connections import READABLE, WRITABLE
 from data_integration_platform.application.masking import scrub_secrets
 from data_integration_platform.application.secret_governance import (
     OperationOutcome,
     local_secret_id,
-    require_independent_approval,
     require_status,
+)
+from data_integration_platform.application.side_effect_runtime import (
+    approval_verdict,
+    begin_execution,
+    decide_for,
+    preparation_id_for,
+    prepare_for,
+    settle,
+    worker_owner,
 )
 from data_integration_platform.domain.enums import AuditEventType, SecretMigrationStatus
 from data_integration_platform.domain.errors import DomainError, ResourceNotFound
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.harness import HarnessApprovalValue, HarnessRole
+from data_integration_platform.domain.side_effects import SideEffectOperation
 from data_integration_platform.infrastructure.models import DataConnection, SecretMigrationRequest
 from data_integration_platform.infrastructure.secret_factory import (
     build_secret_provider,
@@ -94,6 +100,14 @@ class SecretMigrationService:
             },
             trace_id=trace_id,
         )
+        # 受管入口（FR-57）：申请落库的同时生成副作用准备单，**零外部副作用**。
+        await prepare_for(
+            session,
+            operation=SideEffectOperation.SECRET_MIGRATION,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            trace_id=trace_id,
+        )
         return request
 
     async def decide(
@@ -104,23 +118,35 @@ class SecretMigrationService:
         actor_id: uuid.UUID,
         decision: HarnessApprovalValue,
         reason: str,
+        role: HarnessRole | None = None,
         trace_id: str | None = None,
     ) -> SecretMigrationRequest:
-        """具名审批：安全审批槽 + 申请人不得自批（SOD-01）。"""
+        """具名审批：安全审批槽 + 申请人不得自批（SOD-01）。
+
+        权限、职责槽、自批与同槽冲突**只在受管入口判一次**；这里保留业务状态机的
+        前置检查，两者管的是不同的事（那边管「这次申请还作不作数」，这边管「谁有权批」）。
+        """
         request = await self._require(session, request_id)
         connection = await self._require_connection(session, request.connection_id)
         require_status(request.status, _PENDING, action="审批迁移申请")
-        require_independent_approval(requested_by=request.requested_by, approver_id=actor_id)
-        await require_security_approver(
-            session, project_id=connection.project_id, actor_id=actor_id
+        preparation = await decide_for(
+            session,
+            operation=SideEffectOperation.SECRET_MIGRATION,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            role=role,
+            decision=decision,
+            reason=reason,
+            trace_id=trace_id,
         )
-        request.status = (
-            SecretMigrationStatus.APPROVED
-            if decision is HarnessApprovalValue.APPROVE
-            else SecretMigrationStatus.REJECTED
-        )
-        request.decided_by = actor_id
-        request.decided_at = datetime.now(UTC)
+        verdict = approval_verdict(preparation)
+        if verdict is not None:
+            # 槽位没齐时业务行留在 PENDING：投了一票不等于批准。
+            request.status = (
+                SecretMigrationStatus.APPROVED if verdict else SecretMigrationStatus.REJECTED
+            )
+            request.decided_by = actor_id
+            request.decided_at = datetime.now(UTC)
         request.reason = reason[:2000]
         await session.flush()
         record_audit_event(
@@ -136,7 +162,23 @@ class SecretMigrationService:
         return request
 
     async def execute(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
-        """执行迁移：源 → 目标，保留源凭据，切换连接引用。"""
+        """执行迁移：源 → 目标，保留源凭据，切换连接引用。
+
+        执行前先过受管入口的三道闸（取租约 → 验签 → 重算事实）。取不到准备单就
+        直接拒绝 —— 没有受管申请单的迁移在这里走不下去（FR-23）。
+        """
+        owner = worker_owner()
+        preparation_id = await preparation_id_for(
+            session,
+            operation=SideEffectOperation.SECRET_MIGRATION,
+            aggregate_id=str(request_id),
+        )
+        await begin_execution(session, preparation_id=preparation_id, owner=owner)
+        outcome = await self._apply(session, request_id=request_id)
+        await settle(session, preparation_id=preparation_id, owner=owner, outcome=outcome)
+        return outcome
+
+    async def _apply(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
         request = await self._require(session, request_id)
         require_status(request.status, _APPROVED, action="执行迁移")
         connection = await self._require_connection(session, request.connection_id)

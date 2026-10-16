@@ -16,7 +16,7 @@ from data_integration_platform.api.schemas import (
 )
 from data_integration_platform.application.secret_migrations import SecretMigrationService
 from data_integration_platform.celery_app import dispatch
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.enums import SecretMigrationStatus
 from data_integration_platform.infrastructure.database import get_session
 from data_integration_platform.secret_migration_tasks import execute_secret_migration
 
@@ -92,9 +92,12 @@ async def decide_secret_migration(
             actor_id=actor,
             decision=request.decision,
             reason=request.reason,
+            role=request.role,
             trace_id=trace_id,
         )
         snapshot = SecretMigrationRequestResponse.model_validate(row)
-    if request.decision is HarnessApprovalValue.APPROVE:
+    # 判据是**事实**而不是请求里的意图：多槽位审批里投一票不等于批准，
+    # 投递要看业务事实有没有真的到「已批准」。
+    if snapshot.status is SecretMigrationStatus.APPROVED:
         await dispatch(execute_secret_migration.delay, str(request_id))
     return snapshot

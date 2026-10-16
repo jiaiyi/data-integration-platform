@@ -14,25 +14,31 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from data_integration_platform.application.access import (
-    require_project_roles,
-    require_security_approver,
-)
+from data_integration_platform.application.access import require_project_roles
 from data_integration_platform.application.audit import record_audit_event
 from data_integration_platform.application.connections import READABLE, WRITABLE
 from data_integration_platform.application.masking import scrub_secrets
 from data_integration_platform.application.secret_governance import (
     OperationOutcome,
-    require_independent_approval,
     require_rotation_rollback_window_open,
     require_status,
+)
+from data_integration_platform.application.side_effect_runtime import (
+    approval_verdict,
+    begin_execution,
+    decide_for,
+    preparation_id_for,
+    prepare_for,
+    settle,
+    worker_owner,
 )
 from data_integration_platform.domain.enums import (
     AuditEventType,
     SecretRotationRollbackStatus,
 )
 from data_integration_platform.domain.errors import DomainError, ResourceNotFound
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.harness import HarnessApprovalValue, HarnessRole
+from data_integration_platform.domain.side_effects import SideEffectOperation
 from data_integration_platform.infrastructure.models import (
     DataConnection,
     SecretRotationRequest,
@@ -104,6 +110,13 @@ class SecretRotationRollbackService:
             change_summary={"rotation_request_id": str(rotation_request_id)},
             trace_id=trace_id,
         )
+        await prepare_for(
+            session,
+            operation=SideEffectOperation.SECRET_ROTATION_ROLLBACK,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            trace_id=trace_id,
+        )
         return request
 
     async def decide(
@@ -114,22 +127,32 @@ class SecretRotationRollbackService:
         actor_id: uuid.UUID,
         decision: HarnessApprovalValue,
         reason: str,
+        role: HarnessRole | None = None,
         trace_id: str | None = None,
     ) -> SecretRotationRollbackRequest:
+        """具名审批；权限与职责槽只在受管入口判一次（FR-57）。"""
         request = await self._require(session, request_id)
         connection = await self._require_connection(session, request.connection_id)
         require_status(request.status, _PENDING, action="审批回退申请")
-        require_independent_approval(requested_by=request.requested_by, approver_id=actor_id)
-        await require_security_approver(
-            session, project_id=connection.project_id, actor_id=actor_id
+        preparation = await decide_for(
+            session,
+            operation=SideEffectOperation.SECRET_ROTATION_ROLLBACK,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            role=role,
+            decision=decision,
+            reason=reason,
+            trace_id=trace_id,
         )
-        request.status = (
-            SecretRotationRollbackStatus.APPROVED
-            if decision is HarnessApprovalValue.APPROVE
-            else SecretRotationRollbackStatus.REJECTED
-        )
-        request.decided_by = actor_id
-        request.decided_at = datetime.now(UTC)
+        verdict = approval_verdict(preparation)
+        if verdict is not None:
+            request.status = (
+                SecretRotationRollbackStatus.APPROVED
+                if verdict
+                else SecretRotationRollbackStatus.REJECTED
+            )
+            request.decided_by = actor_id
+            request.decided_at = datetime.now(UTC)
         request.reason = reason[:2000]
         await session.flush()
         record_audit_event(
@@ -145,7 +168,22 @@ class SecretRotationRollbackService:
         return request
 
     async def execute(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
-        """执行回退：把连接切回旧凭据，并恢复旧的凭据签发时间。"""
+        """执行回退：把连接切回旧凭据，并恢复旧的凭据签发时间。
+
+        业务逻辑一行没动，多出来的是受管入口的三道闸（租约 → 验签 → 事实未漂移）。
+        """
+        owner = worker_owner()
+        preparation_id = await preparation_id_for(
+            session,
+            operation=SideEffectOperation.SECRET_ROTATION_ROLLBACK,
+            aggregate_id=str(request_id),
+        )
+        await begin_execution(session, preparation_id=preparation_id, owner=owner)
+        outcome = await self._apply(session, request_id=request_id)
+        await settle(session, preparation_id=preparation_id, owner=owner, outcome=outcome)
+        return outcome
+
+    async def _apply(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
         request = await self._require(session, request_id)
         require_status(request.status, _APPROVED, action="执行回退")
         rotation = await session.get(SecretRotationRequest, request.rotation_request_id)

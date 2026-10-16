@@ -39,10 +39,9 @@ from data_integration_platform.domain.enums import (
     CredentialAlertStatus,
     DataEndpointRole,
     ProjectRole,
-    SecretMigrationStatus,
     SecretRotationStatus,
 )
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.harness import HarnessApprovalValue, HarnessRole
 from data_integration_platform.infrastructure.models import (
     CredentialAlertDelivery,
     CredentialExpiryAlert,
@@ -50,6 +49,7 @@ from data_integration_platform.infrastructure.models import (
     EncryptedSecret,
     Project,
     ProjectMembership,
+    ProjectRoleGrant,
     SecretMigrationRequest,
     SecretRotationRequest,
     User,
@@ -229,6 +229,57 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     await engine.dispose()
 
 
+async def seed_approver(
+    session: AsyncSession, *, project_id: uuid.UUID, role: HarnessRole
+) -> uuid.UUID:
+    """造一个持有指定职责槽的审批人。
+
+    每个槽位一个人：SOD-02 不允许同一个人在**同一张**准备单上占两个槽，
+    所以双人审批的两次调用必须拿到两个不同主体。
+    """
+    user = User(subject=f"approver-{uuid.uuid4().hex[:8]}", display_name="审批人")
+    session.add(user)
+    await session.flush()
+    session.add(
+        ProjectMembership(project_id=project_id, user_id=user.id, role=ProjectRole.APPROVER)
+    )
+    session.add(ProjectRoleGrant(project_id=project_id, user_id=user.id, role=role))
+    await session.flush()
+    return user.id
+
+
+async def approve_and_commit(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    connection_id: uuid.UUID,
+    service: Any,
+    request_id: uuid.UUID,
+    roles: tuple[HarnessRole, ...] = (HarnessRole.SECURITY_APPROVER,),
+) -> None:
+    """走完受管入口的「具名审批 → 提交」。
+
+    集成用例关心的是真库上的业务结果，不关心审批人是谁；但**审批这一步不能跳** ——
+    它正是 T-36 要求所有副作用都经过的那道门，跳过去测到的就不是真实链路了。
+    这里走的是**业务服务自己的 `decide`**：受管记录与业务状态必须一起推进，
+    只推一边会让业务行停在 PENDING、执行时被状态机拦下（踩过一次）。
+    双槽操作（凭据销毁）每个槽位单独一个人，见 `seed_approver`。
+    """
+    for role in roles:
+        async with factory() as session:
+            async with session.begin():
+                connection = await session.get(DataConnection, connection_id)
+                assert connection is not None
+                approver = await seed_approver(session, project_id=connection.project_id, role=role)
+                await service.decide(
+                    session,
+                    request_id=request_id,
+                    actor_id=approver,
+                    decision=HarnessApprovalValue.APPROVE,
+                    reason="集成验证：具名审批",
+                    role=role,
+                )
+
+
 async def seed_connection(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -295,10 +346,13 @@ async def test_migration_moves_credential_between_providers_and_keeps_source(
             )
             source_ref = request.source_secret_ref
             request_id = request.id
-            # 走一遍审批：真实审批人身份不在本测试范围，直接置为已批准。
-            request.status = SecretMigrationStatus.APPROVED
-            request.decided_by = uuid.uuid4()
-            request.decided_at = datetime.now(UTC)
+
+    await approve_and_commit(
+        session_factory,
+        connection_id=connection_id,
+        service=service,
+        request_id=request_id,
+    )
 
     async with session_factory() as session:
         async with session.begin():
@@ -448,16 +502,15 @@ async def test_rotation_validation_uses_real_connectivity(
         assert connection.secret_ref == previous_ref
 
     # ③ 激活后连接切到新凭据，并且**新凭据真的能连上真库**
+    await approve_and_commit(
+        session_factory,
+        connection_id=connection_id,
+        service=service,
+        request_id=good_id,
+    )
     async with session_factory() as session:
         async with session.begin():
-            row = await session.get(SecretRotationRequest, good_id)
-            assert row is not None
-            row.status = SecretRotationStatus.APPROVED
-            row.decided_by = uuid.uuid4()
-            row.decided_at = datetime.now(UTC)
-    async with session_factory() as session:
-        async with session.begin():
-            activated = await service.activate(session, request_id=good_id)
+            activated = await service.execute(session, request_id=good_id)
     assert activated.succeeded is True, activated.reason
 
     async with session_factory() as session:
@@ -581,6 +634,29 @@ async def test_sod01_applies_to_real_rotation_decision(
     connection_id, actor = await seed_connection(session_factory)
     async with session_factory() as session:
         async with session.begin():
+            connection = await session.get(DataConnection, connection_id)
+            assert connection is not None
+            # 申请人在真库上也得先具备「能进审批台 + 持有该槽位」这两个条件，
+            # 否则拦下他的是权限而不是 SOD-01，测到的就不是自批了。
+            membership = await session.scalar(
+                select(ProjectMembership).where(
+                    ProjectMembership.project_id == connection.project_id,
+                    ProjectMembership.user_id == actor,
+                )
+            )
+            assert membership is not None
+            # 取 ADMIN：它同时落在「能申请」（WRITABLE）与「能进审批台」（APPROVER_ROLES）里，
+            # 这样申请人才能既发得出申请、又有资格去批自己那张单。
+            membership.role = ProjectRole.ADMIN
+            session.add(
+                ProjectRoleGrant(
+                    project_id=connection.project_id,
+                    user_id=actor,
+                    role=HarnessRole.SECURITY_APPROVER,
+                )
+            )
+            await session.flush()
+
             row = await SecretRotationService().request(
                 session,
                 connection_id=connection_id,

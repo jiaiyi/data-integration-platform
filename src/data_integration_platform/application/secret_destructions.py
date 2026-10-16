@@ -18,18 +18,23 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from data_integration_platform.application.access import (
-    require_project_roles,
-    require_security_approver,
-)
+from data_integration_platform.application.access import require_project_roles
 from data_integration_platform.application.audit import record_audit_event
 from data_integration_platform.application.connections import READABLE, WRITABLE
 from data_integration_platform.application.masking import scrub_secrets
 from data_integration_platform.application.secret_governance import (
     OperationOutcome,
     local_secret_id,
-    require_independent_approval,
     require_status,
+)
+from data_integration_platform.application.side_effect_runtime import (
+    approval_verdict,
+    begin_execution,
+    decide_for,
+    preparation_id_for,
+    prepare_for,
+    settle,
+    worker_owner,
 )
 from data_integration_platform.domain.enums import (
     AuditEventType,
@@ -39,7 +44,8 @@ from data_integration_platform.domain.enums import (
     SecretRotationStatus,
 )
 from data_integration_platform.domain.errors import DomainError, ResourceNotFound
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.harness import HarnessApprovalValue, HarnessRole
+from data_integration_platform.domain.side_effects import SideEffectOperation
 from data_integration_platform.infrastructure.models import (
     DataConnection,
     SecretDestructionRequest,
@@ -107,6 +113,13 @@ class SecretDestructionService:
             },
             trace_id=trace_id,
         )
+        await prepare_for(
+            session,
+            operation=SideEffectOperation.SECRET_DESTRUCTION,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            trace_id=trace_id,
+        )
         return request
 
     async def decide(
@@ -117,22 +130,36 @@ class SecretDestructionService:
         actor_id: uuid.UUID,
         decision: HarnessApprovalValue,
         reason: str,
+        role: HarnessRole | None = None,
         trace_id: str | None = None,
     ) -> SecretDestructionRequest:
+        """具名审批。
+
+        `secret.destroy` 的效果是 **DESTRUCTIVE**，PDP 因此要求数据审批人与安全审批人
+        各一名 —— 销毁不可逆，一个槽位不足以承担它。所以这里必须**两次具名审批**，
+        每次指明是哪个槽（`role`）。
+        """
         request = await self._require(session, request_id)
         connection = await self._require_connection(session, request.connection_id)
         require_status(request.status, _PENDING, action="审批销毁申请")
-        require_independent_approval(requested_by=request.requested_by, approver_id=actor_id)
-        await require_security_approver(
-            session, project_id=connection.project_id, actor_id=actor_id
+        preparation = await decide_for(
+            session,
+            operation=SideEffectOperation.SECRET_DESTRUCTION,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            role=role,
+            decision=decision,
+            reason=reason,
+            trace_id=trace_id,
         )
-        request.status = (
-            SecretDestructionStatus.APPROVED
-            if decision is HarnessApprovalValue.APPROVE
-            else SecretDestructionStatus.REJECTED
-        )
-        request.decided_by = actor_id
-        request.decided_at = datetime.now(UTC)
+        verdict = approval_verdict(preparation)
+        if verdict is not None:
+            # 两个槽位都批完（`COMMITTED`）才进 APPROVED；只批了一个槽仍然是 PENDING。
+            request.status = (
+                SecretDestructionStatus.APPROVED if verdict else SecretDestructionStatus.REJECTED
+            )
+            request.decided_by = actor_id
+            request.decided_at = datetime.now(UTC)
         request.reason = reason[:2000]
         await session.flush()
         record_audit_event(
@@ -148,6 +175,19 @@ class SecretDestructionService:
         return request
 
     async def execute(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
+        """执行销毁。**这是全平台唯一不可逆的凭据动作**，所以三道闸一道都不省。"""
+        owner = worker_owner()
+        preparation_id = await preparation_id_for(
+            session,
+            operation=SideEffectOperation.SECRET_DESTRUCTION,
+            aggregate_id=str(request_id),
+        )
+        await begin_execution(session, preparation_id=preparation_id, owner=owner)
+        outcome = await self._apply(session, request_id=request_id)
+        await settle(session, preparation_id=preparation_id, owner=owner, outcome=outcome)
+        return outcome
+
+    async def _apply(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
         request = await self._require(session, request_id)
         require_status(request.status, _APPROVED, action="执行销毁")
         connection = await self._require_connection(session, request.connection_id)

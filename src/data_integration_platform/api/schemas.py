@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from data_integration_platform.domain.enums import (
     AgentRunStatus,
+    ApprovalDecisionValue,
     ConnectionStatus,
     ConnectorType,
     CredentialAlertDeliveryStatus,
@@ -18,10 +19,16 @@ from data_integration_platform.domain.enums import (
     CredentialAlertStatus,
     DataEndpointRole,
     DataProfileStatus,
+    ExecutionStatus,
+    ExecutionTrigger,
+    FailureCategory,
+    FailureStage,
     FileAssetFormat,
     PipelineVersionStatus,
     ProjectRole,
     ProjectStatus,
+    ScheduleMisfirePolicy,
+    ScheduleMode,
     SecretDestructionStatus,
     SecretDestructionTarget,
     SecretMigrationStatus,
@@ -29,7 +36,17 @@ from data_integration_platform.domain.enums import (
     SecretRotationStatus,
     UserStatus,
 )
-from data_integration_platform.domain.harness import HarnessApprovalValue, HarnessRole
+from data_integration_platform.domain.harness import (
+    ExecutionPreparationStatus,
+    HarnessApprovalValue,
+    HarnessRole,
+    RiskLevel,
+)
+from data_integration_platform.domain.side_effects import (
+    SideEffectExecutionStatus,
+    SideEffectOperation,
+)
+from data_integration_platform.domain.supervision import SupervisionAction
 
 
 class ResponseModel(BaseModel):
@@ -199,10 +216,16 @@ class UpdateCredentialRotationPolicyRequest(BaseModel):
 
 
 class HarnessDecisionRequest(BaseModel):
-    """受管副作用的具名审批入参。"""
+    """受管副作用的具名审批入参。
+
+    `role` 只在准备单有**多个**审批槽时才是必填的（例如凭据销毁要数据审批人与
+    安全审批人各一名）：只有一个槽时留空即可，服务端取那唯一的槽位。
+    要求两个槽位却不说清是哪一个，服务端会拒绝而不是替调用方猜。
+    """
 
     decision: HarnessApprovalValue
     reason: str = Field(min_length=1, max_length=2000)
+    role: HarnessRole | None = None
 
 
 # ------------------------------------------------------------ 凭据治理（T-15）
@@ -385,3 +408,180 @@ class AgentRunResponse(ResponseModel):
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
+
+
+# ------------------------------------------------------ 通用副作用（T-36）
+class SideEffectPreparationResponse(ResponseModel):
+    """副作用准备单视图。
+
+    `impact_report` 与 `rollback_plan` 是审批人判断「这次动什么」的依据，因此原样返回；
+    两者都由服务端推导，不含凭据、不含原始业务行。
+    """
+
+    id: uuid.UUID
+    operation: SideEffectOperation
+    project_id: uuid.UUID
+    aggregate_type: str
+    aggregate_id: str
+    status: ExecutionPreparationStatus
+    execution_status: SideEffectExecutionStatus
+    risk_level: RiskLevel
+    policy_bundle_version: str
+    environment: str
+    tool_name: str
+    tool_version: str
+    fact_fingerprint: str
+    input_fingerprint: str
+    resource_fingerprint: str
+    impact_report: dict[str, Any]
+    rollback_plan: dict[str, Any]
+    required_roles: list[str]
+    required_approvals: int
+    expires_at: datetime
+    committed_by: uuid.UUID | None
+    committed_at: datetime | None
+    failure_reason: str | None
+    created_by: uuid.UUID
+    created_at: datetime
+
+
+class SideEffectApprovalResponse(ResponseModel):
+    id: uuid.UUID
+    preparation_id: uuid.UUID
+    approver_id: uuid.UUID
+    role: HarnessRole
+    decision: HarnessApprovalValue
+    reason: str
+    decided_at: datetime
+
+
+# ------------------------------------------------------ 执行与三阶段协议（M5）
+class PrepareExecutionRequest(BaseModel):
+    """Prepare 的入参。
+
+    **只有一个幂等键**：风险等级、工具版本、资源范围、制品摘要全部由服务端推导
+    （FR-55）。这里多出任何一个字段，都是在请调用方替服务端决定事实。
+
+    `extra="forbid"` 不是洁癖：pydantic 默认**静默丢弃**未知字段，于是
+    「客户端塞了 `risk_level`」会变成一个成功的 201 —— 调用方以为它生效了，
+    平台却根本没看。拒绝它是让 FR-55 在契约层就成立，而不是靠服务端「选择忽略」。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class ExecutionPreparationResponse(ResponseModel):
+    id: uuid.UUID
+    pipeline_version_id: uuid.UUID
+    status: ExecutionPreparationStatus
+    risk_level: RiskLevel
+    policy_bundle_version: str
+    environment: str
+    tool_name: str
+    tool_version: str
+    artifact_sha256: str
+    input_fingerprint: str
+    resource_fingerprint: str
+    impact_report: dict[str, Any]
+    rollback_plan: dict[str, Any]
+    required_roles: list[str]
+    required_approvals: int
+    expires_at: datetime
+    committed_by: uuid.UUID | None
+    committed_at: datetime | None
+    created_by: uuid.UUID
+    created_at: datetime
+
+
+class ExecutionPreparationDecisionRequest(BaseModel):
+    role: HarnessRole
+    decision: HarnessApprovalValue
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class CancelExecutionRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ExecutionRunResponse(ResponseModel):
+    """执行实例的完整投影。
+
+    指标字段引擎没给就是 `None`，**不用 0 冒充**（FR-61）——「没量到」与
+    「量到 0 行」是两件对排查完全不同的事。
+    """
+
+    id: uuid.UUID
+    pipeline_version_id: uuid.UUID
+    harness_preparation_id: uuid.UUID
+    status: ExecutionStatus
+    trigger: ExecutionTrigger
+    engine_status: str | None
+    seatunnel_job_id: str | None
+    submitted_at: datetime | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    last_observed_at: datetime | None
+    retry_of_run_id: uuid.UUID | None
+    attempt_number: int
+    cancel_requested_at: datetime | None
+    cancel_reason: str | None
+    source_rows: int | None
+    sink_rows: int | None
+    source_bytes: int | None
+    sink_bytes: int | None
+    table_metrics: dict[str, Any] | None
+    failure_category: FailureCategory | None
+    failure_stage: FailureStage | None
+    retryable: bool | None
+    diagnosis: dict[str, Any] | None
+    supervision_action: SupervisionAction | None
+    supervision_contract_sha256: str | None
+    quarantined_at: datetime | None
+    quarantine_reason: str | None
+    schedule_id: uuid.UUID | None
+    scheduled_for: datetime | None
+    watermark_window: dict[str, Any] | None
+    created_at: datetime
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """版本审批的具名决策。
+
+    与副作用的 `HarnessDecisionRequest` 刻意分开：两者用的**不是同一套审批枚举**
+    （`ApprovalDecisionValue` 管「版本能不能被执行准备引用」，
+    `HarnessApprovalValue` 管「这条受管副作用能不能动手」），
+    合成一个模型会让两套语义在契约层就含糊掉。
+    """
+
+    decision: ApprovalDecisionValue
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ScheduleResponse(ResponseModel):
+    id: uuid.UUID
+    version_id: uuid.UUID
+    mode: ScheduleMode
+    cron_expression: str
+    timezone: str
+    misfire_policy: ScheduleMisfirePolicy
+    enabled: bool
+    watermark_column: str | None
+    watermark_window_start: datetime | None
+    watermark_window_end: datetime | None
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    created_at: datetime
+
+
+class ConfigureScheduleRequest(BaseModel):
+    mode: ScheduleMode
+    cron_expression: str = Field(min_length=1, max_length=128)
+    timezone: str = Field(min_length=1, max_length=64)
+    misfire_policy: ScheduleMisfirePolicy
+    watermark_column: str | None = Field(default=None, max_length=255)
+
+
+class SetScheduleEnabledRequest(BaseModel):
+    enabled: bool

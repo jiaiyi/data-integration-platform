@@ -15,7 +15,7 @@ from data_integration_platform.application.secret_rotation_rollbacks import (
     SecretRotationRollbackService,
 )
 from data_integration_platform.celery_app import dispatch
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.enums import SecretRotationRollbackStatus
 from data_integration_platform.infrastructure.database import get_session
 from data_integration_platform.secret_rotation_rollback_tasks import (
     execute_secret_rotation_rollback,
@@ -95,9 +95,11 @@ async def decide_secret_rotation_rollback(
             actor_id=actor,
             decision=request.decision,
             reason=request.reason,
+            role=request.role,
             trace_id=trace_id,
         )
         snapshot = SecretRotationRollbackRequestResponse.model_validate(row)
-    if request.decision is HarnessApprovalValue.APPROVE:
+    # 判据是事实而不是请求里的意图：多槽位审批里投一票不等于批准。
+    if snapshot.status is SecretRotationRollbackStatus.APPROVED:
         await dispatch(execute_secret_rotation_rollback.delay, str(request_id))
     return snapshot

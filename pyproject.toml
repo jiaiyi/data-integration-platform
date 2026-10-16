@@ -135,6 +135,7 @@ module = [
     "data_integration_platform.secret_migration_tasks",
     "data_integration_platform.secret_rotation_rollback_tasks",
     "data_integration_platform.secret_rotation_tasks",
+    "data_integration_platform.side_effect_tasks",
 ]
 disallow_untyped_decorators = false
 

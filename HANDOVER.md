@@ -2,7 +2,7 @@
 
 > 用途：跨会话延续本项目开发。**先读本文件，再读 `README.md`（进度表 + 本机联调坑）
 > 与 `specs/SPEC.md §10`（任务分解）。**
-> 最后更新：2026-10-16，对应提交 `e43618c`（M5 进行中）。
+> 最后更新：2026-10-16，M5 进行中（T-33 ~ T-39 与 T-36、执行 API 已完成）。
 
 ---
 
@@ -13,13 +13,13 @@
 | M0 工程基座 / M1 领域与身份 / M2 受管数据上下文 | **完成，并已真实验证** |
 | M3 生成与制品治理 | **完成**，生成链路已用真实 DeepSeek + 真实 SeaTunnel 2.3.13 端到端跑通 |
 | M4 Harness 安全内核（T-24 ~ T-32） | **完成**（内核与契约测试都在） |
-| M5 三阶段协议与执行 | **进行中**：T-33/34/35/37/38/39 已完成并已用真实引擎跑通；**剩 T-36、T-40 与执行 API** |
+| M5 三阶段协议与执行 | **进行中**：T-33 ~ T-39 已完成；**T-36 通用副作用框架与执行相关 API（API-05~08、取消、版本审批、调度）也已完成**；**剩 T-40 交付** |
 
 **接手时先确认仓库是好的：**
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-uv run pytest                                   # 期望 731 passed
+uv run pytest                                   # 期望 738 passed
 uv run pytest -m integration                    # 期望 28 passed（需要 Compose 全栈）
 docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在跑
 ```
@@ -37,10 +37,18 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| **FR-57 / FR-23**「所有副作用走同一受管入口」 | **只做了一半** | 生成与执行链路已经走 Broker / Capability / Outbox / Ledger（T-35、T-37）。但**九类受管副作用**（执行取消、Doris 回滚/清理、凭据迁移/轮换暂存/验证/激活/回退/销毁）**仍走 M2 各自的既有路径**，没有统一到 T-36 的入口。**在此之前不得声称 FR-57 已满足。** |
-| **SPEC API-05 ~ API-08** 执行相关端点 | **未做** | `executions` / `side_effects` / `approvals` 路由仍是空壳。准备单的创建与查询、具名审批决策、Commit、执行查询**都没有 HTTP 入口**，只能由服务层调用。§4 记录了真实烟测是怎么直接调服务层跑的。 |
 | **T-40 交付与受管文件输出** | **未做** | 执行结果目前只是引擎侧的作业状态；把结果交付成受管文件对象还没做。 |
-| **执行状态的持续对账** | **未做** | `SeaTunnelExecutionEngine.status` 能读引擎状态，但**没有周期性对账任务**：提交之后没人把引擎的推进回写到 `execution_runs`。SPEC T-38 的「状态未知先对账」只做了一半（投影函数与 `None` 语义在，驱动它的扫描不在）。 |
+| **执行状态的持续对账** | **未做** | `SeaTunnelExecutionEngine.status` 能读引擎状态，但**没有周期性对账任务**：提交之后没人把引擎的推进回写到 `execution_runs`。SPEC T-38 的「状态未知先对账」只做了一半（投影函数与 `None` 语义在，驱动它的扫描不在）。**取消也一样**：`CANCELLING` 之后要有人确认引擎真的停了才进 `CANCELLED`，那个确认者也还没写。 |
+| **DORIS_ROLLBACK / DORIS_CLEANUP 的真实执行** | **只做了受管入口** | 准备单/审批/能力/租约齐备，执行器接口 `DorisMaintenancePort` 已定；`create_doris_maintenance()` 会**明确报错**（不静默降级）。真实换名/删表属 M6 的 T-45（SPEC 的划分）。`rollbacks` / `cleanups` 路由因此仍是空壳。 |
+
+### 2.1.1 T-36 落地时的三个定案（**都与 SPEC 字面有出入，是有意为之**）
+
+| 项 | 定案 | 理由 |
+|---|---|---|
+| **轮换的三段（暂存/验证/激活）** | **共用一份准备单**，`operation` 记 `SECRET_ROTATION_STAGE` | 拆成三张会让一次人工审批变成三次，而三者动的是同一把凭据、同一个连接。**因此 FR-57 字面的「9 类各自产生准备单」实际落到 7 张**：轮换三段共用一张，执行侧三类共享 `execution_run` 这一聚合对象但各自独立成单。 |
+| **暂存发生在审批之前** | **保留现状**（受理时暂存 → 异步验证 → 审批 → 激活） | 新凭据必须活到激活那一刻，而调用方只在受理时给过一次；能持久化它的地方只有 Secret Provider —— 暂存就是那次持久化。**代价要说清**：这一处不满足「Commit 之前零外部副作用」，受管的是**激活**那一步。验证仍然在审批之前（`WAITING_APPROVAL` 只能由验证成功的路径进入）。 |
+| **凭据销毁改为双人审批** | **按 PDP 收紧**：数据审批人 + 安全审批人各一名 | 工具清单里 `secret.destroy` 的效果是 `DESTRUCTIVE`，FR-42 要求破坏性写入双人审批。此前只有单安全审批槽，属于与自己的清单自相矛盾。相关用例已改为两次具名审批（`HarnessDecisionRequest` 新增可选 `role`）。 |
+| **提交由谁发起** | 副作用类：**审批齐备即提交**（`decide_for` 内部提交）；执行链路：**申请人单独 Commit**（API-07 无入参） | 前者保留已验收的「批完即执行」交互；后者是 SPEC 明确的三阶段。两者都由服务端强制：执行链路的 `commit()` 要求 `WRITABLE` 项目角色，审批人（`APPROVER`）提交会被 403 挡住。 |
 
 ### 2.2 能力边界（**不是没做完，是刻意如此**，别写成「已满足」）
 
@@ -67,54 +75,39 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 
 ## 3. 下一步该做什么（按顺序）
 
-### 第一步：T-36 通用副作用框架
+### 已完成：T-36 通用副作用框架 + 执行相关 API
 
-把九类操作（`domain/side_effects.py::SideEffectOperation`：执行取消、Doris 回滚/清理、
-凭据迁移/轮换暂存/验证/激活/回退/销毁）统一到同一套「申请—审批—提交」。
+落点（新会话按这个顺序读一遍就够）：
 
-**九类操作现在的真实状态**（这一步之前先看清，别以为是从零开始、也别以为已经接通）：
-
-| 操作 | 现在在哪 |
+| 文件 | 作用 |
 |---|---|
-| `SECRET_MIGRATION` / `SECRET_ROTATION_STAGE` / `_VERIFY` / `_ACTIVATE` / `SECRET_ROTATION_ROLLBACK` / `SECRET_DESTRUCTION` | **已实现**，但走的是 M2 自己那条路：`application/secret_{migrations,rotations,rotation_rollbacks,destructions}.py`，各自有「申请→具名审批→执行」的表与状态机，审批人要持 `SECURITY_APPROVER` 槽。**没有**经过 Capability / Outbox / Broker。 |
-| `EXECUTION_CANCEL` | 引擎侧能力有了（`SeaTunnelExecutionEngine.cancel`），但**没有任何受管路径**，也没有 API。 |
-| `DORIS_ROLLBACK` / `DORIS_CLEANUP` | **什么都没有**，`rollbacks` / `cleanups` 路由是空壳。 |
+| `application/harness/side_effects.py` | 协议本身：`prepare` / `decide` / `commit` / `claim_execution` / `finish_execution` / `verify_grant` / `abandon`，以及能力令牌的登记与原子消费 |
+| `application/harness/side_effect_targets.py` | 九类操作「动什么」的**唯一**推导入口 + 操作到聚合对象的映射 |
+| `application/side_effect_runtime.py` | 执行侧三道闸（`begin_execution`）、执行器接口（`DorisMaintenancePort`）、执行侧三类的执行器 |
+| `side_effect_tasks.py` | 通用副作用 Worker（三段式事务，见文件头） |
+| `application/executions.py` / `api/routes/executions.py` | 执行查询、受管取消、API-05~08 |
+| `api/routes/{approvals,schedules,side_effects}.py` | 版本审批、调度配置、通用副作用查询面 |
+| `tests/test_side_effect_protocol.py` / `tests/test_execution_api.py` | 这两块的验收（21 + 14 条） |
 
-**因此 T-36 有两件事**：① 把已经实现的六类**改成经过准备单/审批/能力令牌**（不是重写业务逻辑 ——
-别把已经验收过的东西推倒）；② 给另外三类补上实现。`HarnessSideEffectPreparation` /
-`HarnessSideEffectApproval` / `HarnessSideEffectCapabilityGrant` 三张表 M1 就建好了，
-`application/harness/` 里的 Broker / Capability / Grants / Outbox 都能直接复用，缺的是
-**把它们串起来的用例层**与 `side_effects` 路由。
-
-### 第二步：执行相关的 API 端点（SPEC API-05 ~ API-08）
-
-- `POST /api/v1/pipeline-versions/{id}/execution-preparations`（Prepare，入参只有 `idempotency_key`，**其余事实服务端冻结**）
-- `POST /api/v1/execution-preparations/{id}/decisions`（具名审批：`role` / `decision` / `reason`）
-- `POST /api/v1/execution-preparations/{id}/commit`（**无入参**，服务端重建事实）
-- `GET /api/v1/execution-runs/{id}`（35 列投影，只返回脱敏聚合指标）
-
-另外还有两块一起补：**版本的审批决策**（`PipelineVersionService.decide_approval` 已实现，
-但没有 HTTP 入口）与**调度配置**（`schedules` 路由是空壳，`application/schedules.py` 已实现）。
-补上它们，生成与执行整条链路才在 HTTP 上闭合。
-
-**`operations` 路由已有 4 个端点**（M2 的凭据盘点与到期告警），可以照它抄。
-
-照现有路由的写法（`api/routes/pipelines.py` / `agent_runs.py`）照抄即可：鉴权用 `ActorId`，
-事务用 `async with session.begin()`，投递用 `celery_app.dispatch`。
-
-### 第三步：T-40 交付与受管文件输出
+### 第一步：T-40 交付与受管文件输出
 
 执行结果交付成受管文件对象，同样受治理。可以复用 `application/file_assets.py` 的落盘
 与校验路径。
 
-### 第四步：M6（质量、监督与治理，T-41 ~ T-46）
+**先想清楚「交付什么」**：引擎目前只回作业状态，不回结果数据（数据直接落在 Doris 里）。
+所以 T-40 现实的对象是**执行产物**——质量报告（T-41）、被拒行样本、诊断摘要之类。
+如果要做「把执行结果导出成文件」，那要先有一条从 Doris 导出的路径，而那属于 M6 的
+T-42/T-45 区域。**动手前先确认用户要的是哪一种**，别默认是后者。
+
+### 第二步：M6（质量、监督与治理，T-41 ~ T-46）
 
 其中 **T-43 运行监督引擎** 与 §2.1 里「执行状态对账」是同一片区域，一起做更省事。
+T-45 会填上 `DorisMaintenancePort` 的真实实现与 `rollbacks` / `cleanups` 路由。
 
 ### 收尾要做的（每轮结束时）
 
 - **控制面库需要重置**：现在里面有前几轮烟测留下的 213 个项目（见 §5）。
-  清库需要 `DROP SCHEMA public CASCADE` 这类操作，**本轮被权限拦截过，没有执行** ——
+  清库需要 `DROP SCHEMA public CASCADE` 这类操作，**被权限拦截过，没有执行** ——
   交给用户确认后再做，别擅自清。
 - 停掉临时的 API / Worker 进程（`Get-CimInstance Win32_Process` 按 `dip-` 匹配后杀）。
 - 删掉临时脚本与 `.env.smoke` 之类文件。
@@ -132,7 +125,7 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 | M2 | 七个探查器 + `probe_registry`、ClickHouse(GAP-01)、S3/MinIO(GAP-02)、REST API(GAP-03)、脱敏、凭据全生命周期 |
 | M3 | `agent/graph.py`（LangGraph）、`application/policy.py`（确定性门禁）、`engine_check.py` + `seatunnel_engine_check.py`、`application/versions.py`（不可变版本）、`application/schedules.py`、生成链路 API + `generation_tasks.py` |
 | M4 | `application/harness/` 九个模块（清单/PDP/分类/签名/重放/Broker/Outbox/账本/失败关闭） |
-| M5（部分） | `application/harness/{preparation,approval,commit,engine,placeholders}.py`、`execution_tasks.py`、`beat_tasks.py`、`infrastructure/seatunnel_execution.py` |
+| M5（部分） | `application/harness/{preparation,approval,commit,engine,placeholders}.py`、`execution_tasks.py`、`beat_tasks.py`、`infrastructure/seatunnel_execution.py`；**本轮**加了 `application/harness/{side_effects,side_effect_targets}.py`、`application/{side_effect_runtime,executions}.py`、`side_effect_tasks.py`，以及 `api/routes/{executions,approvals,schedules,side_effects}.py` |
 
 ### 4.2 实测结论（**排查出来的，别再重新踩**）
 
@@ -161,7 +154,9 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 物化 → 提交 → 引擎 FINISHED`（job `1163409713448222721`）。
 
 > 这次烟测是**直接调服务层**跑的（`SessionFactory` + `application/harness/*` + `execution_tasks._submit`），
-> 因为 §3 第二步要补的那批 HTTP 端点还没写。补完之后重跑一遍走 HTTP 的版本，才算把接口层也验了。
+> 因为当时那批 HTTP 端点还没写。HTTP 端点现已补齐（API-05~08），但**那次端到端烟测没有重跑** ——
+> 接口层目前的证据是 `tests/test_execution_api.py`（14 条，走 ASGI，用假引擎与拦下的投递）。
+> **「走 HTTP 的真引擎端到端」这一条还没有人跑过，别把它写成已验证。**
 > 烟测脚本当时放在仓库外的临时目录，没入库。
 
 ---
@@ -237,6 +232,36 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
     `croniter.is_valid()` **也要**传这个参数，否则 `0 30 3 * * *` 会被判非法。
 19. **工具清单的自洽性在构造期就查**：补偿工具必须真在目录里（否则「可回滚」是空话）、
     同名工具不得重复登记、同名工具的所有版本效果必须一致（否则「这工具危不危险」没有确定答案）。
+20. **副作用表与执行表分开，但规矩同一套**。执行准备单绑的是「管道版本 + 制品字节」，
+    副作用准备单绑的是「聚合对象 + 冻结的事实摘要」—— 一个凭据轮换没有制品，硬塞进
+    `execution_preparations` 只会让那边多出一堆语义为空的列。两边各自的入口函数在
+    `harness/preparation.py` 与 `harness/side_effects.py`，**不要为了「统一」把表合并**。
+21. **副作用能力令牌的绑定项是复用执行链路的，含义要按副作用解读**：
+    `artifact_sha256` = 事实摘要（副作用没有制品）、`supervision_contract_sha256` = 影响面摘要
+    （副作用没有运行预算，等价约束是「影响面不得在执行期变化」）、
+    `data_classification_sha256` = 数据分级摘要。写在 `side_effects.py` 的表里，别猜。
+22. **「终态不可用」与「事实未漂移」必须分成两个判断**。执行侧要走的路不同：一张已提交的
+    准备单当然「不能再审批」，但它正该被执行。合成一个判断会让**所有已提交的副作用在执行时
+    被自己的终态挡住**（写过一次，回归用例 `test_execution_happens_once_and_consumes_the_lease`
+    盯着这条）。执行侧也不查准备单 TTL —— 那一刻管用的是能力令牌自己的有效期。
+23. **执行租约必须在验签之前取**。反过来先验签再抢租约的话，两个 Worker 会同时通过验签、
+    同时动手，租约就白设了。同理，租约冲突（`SideEffectLeaseBusy`）**不是失败**，
+    调用方应当安全延迟重试，不要落 `FAILED`。
+24. **事实摘要只放不可变字段**。往里面塞 `status`、`engine_status` 这类会变的列，会让
+    执行前那次重算比对把它们判成「事实被改过」，于是每一张单子都在执行时作废。
+    要动的对象的**标识**进摘要，它的**状态**不进。
+25. **取消的理由写在执行记录上（`cancel_reason`），不进准备单事实**。理由是「发起时的意图」，
+    而准备单冻结的是「要动哪个作业」；自由文本进事实只会给指纹多一个漂移源。
+    `cancel_requested_at` 记的是**请求送达引擎**的时刻，不是申请的时刻 —— 申请可能还压在审批里。
+26. **路由判「要不要投递执行」看的是响应快照里的状态，不是请求里的意图**。
+    多槽位审批里投一票不等于批准（`snapshot.status is APPROVED` 才算），
+    看 `request.decision is APPROVE` 会在凭据销毁这类双人审批上提前投递。
+27. **pydantic 默认静默丢弃未知字段**。所以 FR-55 那种「客户端不许提供事实」的入参必须写
+    `model_config = ConfigDict(extra="forbid")` —— 否则客户端塞了 `risk_level` 会拿到一个
+    成功的 201，它以为生效了，平台根本没看。
+28. **要发多次 HTTP 请求的测试，夹具数据必须真提交**。`session` 夹具只 flush 不 commit，
+    而每个请求结束时应用层的事务会结束 —— 没提交的事实下一次请求就读不到了。这类模块
+    统一用 `session_factory` + 显式 `async with session.begin()`（见 `test_execution_api.py`）。
 
 ---
 
@@ -244,13 +269,14 @@ docker compose -f infra/compose.yaml --profile e2e ps   # 期望 8 个服务在�
 
 | 手段 | 覆盖什么 | 不覆盖什么 |
 |---|---|---|
-| 单元 / 契约测试（703 条） | 状态机、门禁、PDP、分类、签名、重放、Outbox、账本、脱敏、格式推断、SQL 生成、身份与职责分离 | 任何真实外部系统 |
+| 单元 / 契约测试（738 条） | 状态机、门禁、PDP、分类、签名、重放、Outbox、账本、脱敏、格式推断、SQL 生成、身份与职责分离、九类副作用的受管入口与执行租约 | 任何真实外部系统 |
 | `pytest -m integration`（28 条） | 真实 PostgreSQL / MySQL / MinIO / Doris / SeaTunnel 提交与状态；未起服务时**整组跳过** | 需要 Docker Hub 镜像的数据源、真实 Vault、真实 LLM |
 | 服务层端到端烟测 | 业务事实的完整推进（生成、三阶段协议、Outbox → Worker → 引擎） | 同上；**且它绕过 HTTP 层**，接口契约由 API 测试单独覆盖 |
 
-**演示时最有说服力的两条命令**：
+**演示时最有说服力的三条命令**：
 
 ```bash
-uv run pytest -m integration                    # 真实引擎的提交与状态投影
-uv run pytest tests/test_tool_broker.py -q      # 「无绕过路径」的证据是执行器调用次数为 0
+uv run pytest -m integration                          # 真实引擎的提交与状态投影
+uv run pytest tests/test_tool_broker.py -q            # 「无绕过路径」的证据是执行器调用次数为 0
+uv run pytest tests/test_side_effect_protocol.py -q   # 九类操作各自产生准备单/审批/能力记录
 ```

@@ -41,6 +41,7 @@ from data_integration_platform.domain.enums import (
     CredentialAlertLevel,
     CredentialAlertStatus,
     DataEndpointRole,
+    SecretDestructionStatus,
     SecretDestructionTarget,
     SecretMigrationStatus,
     SecretRotationStatus,
@@ -143,6 +144,53 @@ async def actor_for_approver(client: AsyncClient, project: str, admin: str) -> s
     return next(item["user_id"] for item in members.json() if item["user_id"] != admin)
 
 
+async def actor_for_data_approver(client: AsyncClient, project: str, admin: str) -> str:
+    """第三个主体：持有数据审批槽。
+
+    凭据销毁的效果是 DESTRUCTIVE，PDP 因此要数据审批人与安全审批人**各一名**；
+    同一个人不能在同一张准备单上占两个槽（SOD-02），所以必须是两个不同的人。
+    """
+    member = await client.put(
+        f"/api/v1/projects/{project}/members",
+        json={"subject": "wangwu", "display_name": "王五", "role": "APPROVER"},
+        headers={"X-Actor-Id": admin},
+    )
+    assert member.status_code in (200, 201), member.text
+    user_id = member.json()["user_id"]
+    granted = await client.post(
+        f"/api/v1/projects/{project}/role-grants",
+        json={"user_id": user_id, "role": "DATA_APPROVER"},
+        headers={"X-Actor-Id": admin},
+    )
+    assert granted.status_code == 201, granted.text
+    return user_id
+
+
+async def approve_destruction(
+    client: AsyncClient,
+    *,
+    request_id: uuid.UUID,
+    security_approver: str,
+    data_approver: str,
+) -> dict[str, Any]:
+    """走完销毁的双人审批：第一票只是投票，第二票齐备才提交并投递执行。"""
+    first = await client.post(
+        f"/api/v1/secret-destructions/{request_id}/decisions",
+        json={"decision": "APPROVE", "reason": "数据维度通过", "role": "DATA_APPROVER"},
+        headers={"X-Actor-Id": data_approver},
+    )
+    assert first.status_code == 200, first.text
+    # 只批了一个槽：业务行还不能显示「已批准」，也不该投递执行任务。
+    assert first.json()["status"] == SecretDestructionStatus.PENDING.value
+    second = await client.post(
+        f"/api/v1/secret-destructions/{request_id}/decisions",
+        json={"decision": "APPROVE", "reason": "安全维度通过", "role": "SECURITY_APPROVER"},
+        headers={"X-Actor-Id": security_approver},
+    )
+    assert second.status_code == 200, second.text
+    return second.json()
+
+
 async def connection_row(
     session_factory: async_sessionmaker[AsyncSession], connection_id: str
 ) -> DataConnection:
@@ -190,7 +238,7 @@ async def rotate_through_activation(
     assert decided.status_code == 200, decided.text
     async with session_factory() as session:
         async with session.begin():
-            await SecretRotationService().activate(session, request_id=request_id)
+            await SecretRotationService().execute(session, request_id=request_id)
     return str(request_id)
 
 
@@ -203,6 +251,14 @@ async def test_migration_requires_independent_security_approval(
     admin, project = await setup_project(client)
     approver = await actor_for_approver(client, project, admin)
     connection_id = await setup_connection(client, admin, project)
+    # 把安全审批槽也给管理员：否则自批会先被「你没有这个槽位」挡住，
+    # 测到的就不是 SOD-01 了。这与执行链路的 `test_applicant_cannot_approve` 同一手法。
+    granted = await client.post(
+        f"/api/v1/projects/{project}/role-grants",
+        json={"user_id": admin, "role": "SECURITY_APPROVER"},
+        headers={"X-Actor-Id": admin},
+    )
+    assert granted.status_code == 201, granted.text
 
     created = await client.post(
         "/api/v1/secret-migrations",
@@ -403,6 +459,14 @@ async def test_rotation_activation_swaps_reference_and_opens_rollback_window(
 ) -> None:
     admin, project = await setup_project(client)
     approver = await actor_for_approver(client, project, admin)
+    # 管理员也要拿到安全审批槽，否则自批会被「你没有这个槽位」先挡住，
+    # 测到的就不是 SOD-01 了（与执行链路的 `test_applicant_cannot_approve` 同一手法）。
+    granted = await client.post(
+        f"/api/v1/projects/{project}/role-grants",
+        json={"user_id": admin, "role": "SECURITY_APPROVER"},
+        headers={"X-Actor-Id": admin},
+    )
+    assert granted.status_code == 201, granted.text
     connection_id = await setup_connection(client, admin, project)
     before = await connection_row(session_factory, connection_id)
     original_ref = before.secret_ref
@@ -447,7 +511,7 @@ async def test_rotation_activation_swaps_reference_and_opens_rollback_window(
 
     async with session_factory() as session:
         async with session.begin():
-            outcome = await SecretRotationService().activate(session, request_id=request_id)
+            outcome = await SecretRotationService().execute(session, request_id=request_id)
     assert outcome.succeeded is True
 
     after = await connection_row(session_factory, connection_id)
@@ -609,6 +673,7 @@ async def test_destruction_of_rotation_source_after_activation(
     """轮换成功后销毁旧凭据：这是唯一被允许销毁「源凭据」的时机。"""
     admin, project = await setup_project(client)
     approver = await actor_for_approver(client, project, admin)
+    data_approver = await actor_for_data_approver(client, project, admin)
     connection_id = await setup_connection(client, admin, project)
     original_ref = (await connection_row(session_factory, connection_id)).secret_ref
     rotation_id = await rotate_through_activation(
@@ -628,12 +693,13 @@ async def test_destruction_of_rotation_source_after_activation(
     assert created.status_code == 201, created.text
     request_id = uuid.UUID(created.json()["id"])
 
-    approved = await client.post(
-        f"/api/v1/secret-destructions/{request_id}/decisions",
-        json={"decision": "APPROVE", "reason": "同意销毁"},
-        headers={"X-Actor-Id": approver},
+    approved = await approve_destruction(
+        client,
+        request_id=request_id,
+        security_approver=approver,
+        data_approver=data_approver,
     )
-    assert approved.status_code == 200
+    assert approved["status"] == SecretDestructionStatus.APPROVED.value
     assert "execute_secret_destruction" in dispatched[-1]
 
     async with session_factory() as session:
@@ -697,6 +763,7 @@ async def test_destruction_of_rolled_back_staged_secret(
     """已回退的暂存凭据是被允许销毁的另一类目标。"""
     admin, project = await setup_project(client)
     approver = await actor_for_approver(client, project, admin)
+    data_approver = await actor_for_data_approver(client, project, admin)
     connection_id = await setup_connection(client, admin, project)
     rotation_id = await rotate_through_activation(
         session_factory, client, connection_id=connection_id, admin=admin, approver=approver
@@ -734,10 +801,11 @@ async def test_destruction_of_rolled_back_staged_secret(
     )
     assert created.status_code == 201, created.text
     request_id = uuid.UUID(created.json()["id"])
-    await client.post(
-        f"/api/v1/secret-destructions/{request_id}/decisions",
-        json={"decision": "APPROVE", "reason": "同意"},
-        headers={"X-Actor-Id": approver},
+    await approve_destruction(
+        client,
+        request_id=request_id,
+        security_approver=approver,
+        data_approver=data_approver,
     )
     async with session_factory() as session:
         async with session.begin():

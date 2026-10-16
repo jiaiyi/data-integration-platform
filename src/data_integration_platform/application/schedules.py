@@ -47,6 +47,9 @@ from data_integration_platform.infrastructure.models import (
 )
 
 WRITABLE = frozenset({ProjectRole.ADMIN, ProjectRole.DATA_ENGINEER})
+READABLE = frozenset(
+    {ProjectRole.ADMIN, ProjectRole.DATA_ENGINEER, ProjectRole.APPROVER, ProjectRole.VIEWER}
+)
 
 # 允许配置调度的版本状态：冻结之后的内容才算数，DRAFT/PROFILING 还给不出要调度什么。
 SCHEDULABLE_STATES = frozenset(
@@ -207,6 +210,7 @@ class PipelineScheduleService:
         misfire_policy: ScheduleMisfirePolicy,
         watermark_column: str | None = None,
         now: datetime | None = None,
+        trace_id: str | None = None,
     ) -> PipelineSchedule:
         """配置（或重配）某版本的调度策略，并重新冻结触发时刻与水位窗口。"""
         version = await self._require_version(session, version_id)
@@ -256,6 +260,7 @@ class PipelineScheduleService:
                 "misfire_policy": misfire_policy.value,
                 "next_run_at": next_run_at.isoformat(),
             },
+            trace_id=trace_id,
         )
         return schedule
 
@@ -267,6 +272,7 @@ class PipelineScheduleService:
         actor_id: uuid.UUID,
         enabled: bool,
         now: datetime | None = None,
+        trace_id: str | None = None,
     ) -> PipelineSchedule:
         """启停调度。
 
@@ -296,8 +302,31 @@ class PipelineScheduleService:
             actor_id=actor_id,
             target_id=str(schedule.id),
             change_summary={"version_id": str(version.id), "enabled": enabled},
+            trace_id=trace_id,
         )
         return schedule
+
+    async def get_for_version(
+        self, session: AsyncSession, *, version_id: uuid.UUID, actor_id: uuid.UUID
+    ) -> PipelineSchedule | None:
+        """某版本的调度配置；没配过返回 `None`。
+
+        刻意不返回空对象：「没配过」与「配了但关着」对调用方是两件事 ——
+        前者要引导去配置，后者只要打开开关。
+        读取**不校验可调度状态**：版本状态后来变了，已配的调度照样该看得见。
+        """
+        version = await session.get(PipelineVersion, version_id)
+        if version is None:
+            raise ResourceNotFound("管道版本不存在")
+        pipeline = await session.get(Pipeline, version.pipeline_id)
+        if pipeline is None:
+            raise ResourceNotFound("管道不存在")
+        await require_project_roles(
+            session, project_id=pipeline.project_id, actor_id=actor_id, allowed=READABLE
+        )
+        return await session.scalar(
+            select(PipelineSchedule).where(PipelineSchedule.version_id == version_id)
+        )
 
     async def advance(
         self,

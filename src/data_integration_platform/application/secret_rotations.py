@@ -16,10 +16,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from data_integration_platform.application.access import (
-    require_project_roles,
-    require_security_approver,
-)
+from data_integration_platform.application.access import require_project_roles
 from data_integration_platform.application.audit import record_audit_event
 from data_integration_platform.application.connections import READABLE, WRITABLE
 from data_integration_platform.application.credential_alerts import resolve_open_alerts
@@ -28,14 +25,24 @@ from data_integration_platform.application.probing import CredentialVerifier
 from data_integration_platform.application.secret_governance import (
     OperationOutcome,
     local_secret_id,
-    require_independent_approval,
     require_status,
 )
 from data_integration_platform.application.secrets import ConnectionCredentials
+from data_integration_platform.application.side_effect_runtime import (
+    abandon_for,
+    approval_verdict,
+    begin_execution,
+    decide_for,
+    preparation_id_for,
+    prepare_for,
+    settle,
+    worker_owner,
+)
 from data_integration_platform.config import get_settings
 from data_integration_platform.domain.enums import AuditEventType, SecretRotationStatus
 from data_integration_platform.domain.errors import DomainError, ResourceNotFound
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.harness import HarnessApprovalValue, HarnessRole
+from data_integration_platform.domain.side_effects import SideEffectOperation
 from data_integration_platform.infrastructure.models import DataConnection, SecretRotationRequest
 from data_integration_platform.infrastructure.secret_factory import (
     provider_name_of,
@@ -106,6 +113,21 @@ class SecretRotationService:
             },
             trace_id=trace_id,
         )
+        # 受管入口（FR-57）：一份准备单覆盖这次轮换的三段（暂存 / 验证 / 激活）。
+        #
+        # **为什么暂存发生在审批之前**：新凭据必须活到激活那一刻，而调用方只在受理时
+        # 给过一次；能持久化它的地方只有 Secret Provider —— 暂存就是那次持久化。
+        # 换句话说，「暂存」是受理动作的组成部分（和写申请行是同一件事），
+        # 真正需要人批准的是**激活**：那一步才改变连接用的是哪把凭据。
+        # 审批、提交与能力令牌因此都落在激活这一步上，验证与激活的先后由
+        # `validate()` / `execute()` 之间的业务状态机保证（未验证不得审批）。
+        await prepare_for(
+            session,
+            operation=SideEffectOperation.SECRET_ROTATION_STAGE,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            trace_id=trace_id,
+        )
         return request
 
     async def validate(
@@ -136,6 +158,14 @@ class SecretRotationService:
             connection=connection, credentials=credentials
         )
         if not outcome.succeeded:
+            # 验证没过就进不了审批，但准备单已经建出来了 —— 不同时作废它，
+            # 审批台上会留一张永远点不动的单子，没人知道它其实已经死了。
+            await abandon_for(
+                session,
+                operation=SideEffectOperation.SECRET_ROTATION_STAGE,
+                aggregate_id=str(request.id),
+                reason=outcome.reason or "暂存凭据验证未通过",
+            )
             return await self._fail(session, request, outcome.reason or "暂存凭据验证未通过")
 
         request.validated_at = datetime.now(UTC)
@@ -162,23 +192,30 @@ class SecretRotationService:
         actor_id: uuid.UUID,
         decision: HarnessApprovalValue,
         reason: str,
+        role: HarnessRole | None = None,
         trace_id: str | None = None,
     ) -> SecretRotationRequest:
         """具名审批；只能在**验证通过之后**审批（`WAITING_APPROVAL`）。"""
         request = await self._require(session, request_id)
         connection = await self._require_connection(session, request.connection_id)
         require_status(request.status, _WAITING, action="审批轮换申请")
-        require_independent_approval(requested_by=request.requested_by, approver_id=actor_id)
-        await require_security_approver(
-            session, project_id=connection.project_id, actor_id=actor_id
+        preparation = await decide_for(
+            session,
+            operation=SideEffectOperation.SECRET_ROTATION_STAGE,
+            aggregate_id=str(request.id),
+            actor_id=actor_id,
+            role=role,
+            decision=decision,
+            reason=reason,
+            trace_id=trace_id,
         )
-        request.status = (
-            SecretRotationStatus.APPROVED
-            if decision is HarnessApprovalValue.APPROVE
-            else SecretRotationStatus.REJECTED
-        )
-        request.decided_by = actor_id
-        request.decided_at = datetime.now(UTC)
+        verdict = approval_verdict(preparation)
+        if verdict is not None:
+            request.status = (
+                SecretRotationStatus.APPROVED if verdict else SecretRotationStatus.REJECTED
+            )
+            request.decided_by = actor_id
+            request.decided_at = datetime.now(UTC)
         request.reason = reason[:2000]
         await session.flush()
         record_audit_event(
@@ -193,8 +230,20 @@ class SecretRotationService:
         )
         return request
 
-    async def activate(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
-        """激活：把连接切换到暂存凭据，重算有效期并开启回退窗口。"""
+    async def execute(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
+        """激活已批准的轮换；先过受管入口的三道闸（取租约 → 验签 → 事实未漂移）。"""
+        owner = worker_owner()
+        preparation_id = await preparation_id_for(
+            session,
+            operation=SideEffectOperation.SECRET_ROTATION_STAGE,
+            aggregate_id=str(request_id),
+        )
+        await begin_execution(session, preparation_id=preparation_id, owner=owner)
+        outcome = await self._apply(session, request_id=request_id)
+        await settle(session, preparation_id=preparation_id, owner=owner, outcome=outcome)
+        return outcome
+
+    async def _apply(self, session: AsyncSession, *, request_id: uuid.UUID) -> OperationOutcome:
         request = await self._require(session, request_id)
         require_status(request.status, _APPROVED, action="激活轮换")
         connection = await self._require_connection(session, request.connection_id)

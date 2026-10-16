@@ -30,6 +30,7 @@ celery_app = Celery(
         "data_integration_platform.secret_rotation_tasks",
         "data_integration_platform.secret_rotation_rollback_tasks",
         "data_integration_platform.secret_destruction_tasks",
+        "data_integration_platform.side_effect_tasks",
         "data_integration_platform.credential_alert_tasks",
     ],
 )

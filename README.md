@@ -147,16 +147,17 @@ cd frontend && npm run build   # 前端构建（含 vue-tsc）
 | M2 受管数据上下文 | T-10 探查契约 / T-11 七个探查器 / T-12 ClickHouse(GAP-01) / T-13 脱敏 / T-14 SecretProvider / T-15 凭据全生命周期 / T-16 文件与对象存储(GAP-02) / T-17 REST API(GAP-03) | 已完成 |
 | M3 生成与制品治理 | T-18 生成契约 / T-19 状态机 / T-20 确定性门禁 / T-21 真实引擎检查 / T-22 不可变版本 / T-23 调度策略 / 生成链路 API 与 Worker 接线 | **已完成** |
 | M4 Harness 安全内核 | T-24 工具契约清单 / T-25 PDP / T-26 数据分类 / T-27 Tool Broker / T-28 Capability 签名 / T-29 Replay Guard / T-30 事务 Outbox / T-31 证据账本 / T-32 失败关闭 | **已完成** |
-| M5 三阶段协议与执行 | T-33 Prepare / T-34 Approve / T-35 Commit / T-37 Worker 验签 / T-38 SeaTunnel 对接 / T-39 Beat **已完成**；T-36 通用副作用框架 / T-40 交付 / 执行相关 API **待做** | 进行中 |
+| M5 三阶段协议与执行 | T-33 ~ T-39 **已完成**；T-36 通用副作用框架与执行相关 API **已完成**；T-40 交付与受管文件输出 **待做** | 进行中 |
 | M6 质量、监督与治理 | T-41 ~ T-46 | 待开工 |
 | M7 控制台 | T-47 ~ T-53 | 待开工 |
 | M8 评测与安全进化 | T-54 ~ T-58、T-63 | 待开工 |
 | M9 端到端与交付 | T-59 ~ T-62 | 待开工 |
 
 `api/routes/` 下已建全部 18 个 Router 模块并挂载：已实现端点的是 `health` / `projects` /
-`connections` / `file_assets` / `pipelines` / `agent_runs` / `operations`；
-`executions` / `approvals` / `side_effects` / `rollbacks` / `cleanups` / `schedules`
-仍是空的 `APIRouter` 对象，由对应里程碑填充（**不留返回 501 的假端点**）。
+`connections` / `file_assets` / `pipelines` / `agent_runs` / `operations` / `executions` /
+`approvals` / `schedules` / `side_effects` 与四个 `secret_*`；
+`rollbacks` / `cleanups` / `safety_evolution` 仍是空的 `APIRouter` 对象，
+由对应里程碑填充（**不留返回 501 的假端点**）。
 
 ## 明确不做（避免误判）
 

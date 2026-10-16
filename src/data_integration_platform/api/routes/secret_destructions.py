@@ -17,7 +17,7 @@ from data_integration_platform.api.schemas import (
 )
 from data_integration_platform.application.secret_destructions import SecretDestructionService
 from data_integration_platform.celery_app import dispatch
-from data_integration_platform.domain.harness import HarnessApprovalValue
+from data_integration_platform.domain.enums import SecretDestructionStatus
 from data_integration_platform.infrastructure.database import get_session
 from data_integration_platform.secret_destruction_tasks import execute_secret_destruction
 
@@ -94,9 +94,11 @@ async def decide_secret_destruction(
             actor_id=actor,
             decision=request.decision,
             reason=request.reason,
+            role=request.role,
             trace_id=trace_id,
         )
         snapshot = SecretDestructionRequestResponse.model_validate(row)
-    if request.decision is HarnessApprovalValue.APPROVE:
+    # 判据是事实而不是请求里的意图：多槽位审批里投一票不等于批准。
+    if snapshot.status is SecretDestructionStatus.APPROVED:
         await dispatch(execute_secret_destruction.delay, str(request_id))
     return snapshot

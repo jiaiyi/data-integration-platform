@@ -94,6 +94,13 @@ class SecretRotateInput(_ToolInput):
     rotation_request_id: str = Field(min_length=1, max_length=64)
 
 
+class SecretMigrateInput(_ToolInput):
+    """换存放位置，不换凭据内容；源凭据保留，所以没有声明补偿工具。"""
+
+    connection_id: str = Field(min_length=1, max_length=64)
+    migration_request_id: str = Field(min_length=1, max_length=64)
+
+
 class SecretDestroyInput(_ToolInput):
     connection_id: str = Field(min_length=1, max_length=64)
     destruction_request_id: str = Field(min_length=1, max_length=64)
@@ -332,6 +339,18 @@ def build_tool_registry(*, seatunnel_version: str = "2.3.13") -> ToolRegistry:
                 idempotent=False,
                 model=SecretRotateInput,
                 compensation_tool="secret.rollback_rotation",
+            ),
+            _manifest(
+                name="secret.migrate",
+                version="1.0.0",
+                effect=ToolEffect.SECRET_USE,
+                timeout_seconds=300,
+                records=1,
+                bytes_=1024**2,
+                # 重放会把凭据再写一份到目标 Provider，但不会覆盖连接引用之外的东西；
+                # 仍按不幂等声明 —— 「可回退」靠的是源凭据保留，不是靠重放安全。
+                idempotent=False,
+                model=SecretMigrateInput,
             ),
             _manifest(
                 name="secret.rollback_rotation",

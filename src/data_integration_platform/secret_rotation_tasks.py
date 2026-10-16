@@ -37,8 +37,11 @@ def validate_secret_rotation(request_id: str) -> dict[str, Any]:
 
 @celery_app.task(name="data_integration_platform.secret_rotation_tasks.activate_secret_rotation")
 def activate_secret_rotation(request_id: str) -> dict[str, Any]:
-    """激活已批准的轮换：切换连接引用、重算有效期、开启回退窗口。"""
+    """激活已批准的轮换：切换连接引用、重算有效期、开启回退窗口。
+
+    走受管入口的 `execute`（取租约 → 验签 → 事实未漂移）；取不到准备单直接拒绝。
+    """
     outcome: OperationOutcome = run_in_transaction(
-        lambda session: SecretRotationService().activate(session, request_id=uuid.UUID(request_id))
+        lambda session: SecretRotationService().execute(session, request_id=uuid.UUID(request_id))
     )
     return {"request_id": request_id, "succeeded": outcome.succeeded, "reason": outcome.reason}
